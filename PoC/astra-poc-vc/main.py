@@ -45,8 +45,17 @@ async def chat_endpoint(request: ChatRequest):
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
-                        content_buffer += chunk.content
-                        yield f"data: {json.dumps({'type': 'message', 'content': chunk.content})}\n\n"
+                        # Handle content that may be a list of content blocks or a string
+                        content = chunk.content
+                        if isinstance(content, list):
+                            # Extract text from content blocks
+                            content = "".join(
+                                block.get("text", "") if isinstance(block, dict) else str(block)
+                                for block in content
+                            )
+                        if content:
+                            content_buffer += content
+                            yield f"data: {json.dumps({'type': 'message', 'content': content})}\n\n"
                         
                 # Stream the UI widgets from tool calls!
                 elif kind == "on_tool_start" and name == "render_widget":
@@ -71,7 +80,14 @@ async def chat_endpoint(request: ChatRequest):
                         
                         # Only yield text content if we haven't streamed anything
                         if hasattr(last_message, "content") and last_message.content and not content_buffer:
-                            yield f"data: {json.dumps({'type': 'message', 'content': last_message.content})}\n\n"
+                            content = last_message.content
+                            if isinstance(content, list):
+                                content = "".join(
+                                    block.get("text", "") if isinstance(block, dict) else str(block)
+                                    for block in content
+                                )
+                            if content:
+                                yield f"data: {json.dumps({'type': 'message', 'content': content})}\n\n"
                             
                         # And handle tools if on_tool_start somehow didn't fire
                         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
