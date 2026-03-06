@@ -1,16 +1,109 @@
-// Initialize GridStack
+// ─── AgentConnection: WebSocket client with reconnect ───
+
+class AgentConnection {
+    constructor() {
+        this._sessionId = null;
+        this._ws = null;
+        this._retryCount = 0;
+        this._maxRetries = 5;
+        this._retryDelays = [1000, 2000, 4000, 8000, 16000];
+        this._callbacks = {
+            token: null,
+            widget: null,
+            done: null,
+            error: null,
+            session_init: null,
+        };
+        this._connect();
+    }
+
+    _buildUrl() {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        let url = `${proto}//${window.location.host}/ws`;
+        if (this._sessionId) {
+            url += `?session_id=${encodeURIComponent(this._sessionId)}`;
+        }
+        return url;
+    }
+
+    _connect() {
+        const url = this._buildUrl();
+        this._ws = new WebSocket(url);
+
+        this._ws.onopen = () => {
+            console.log('[AgentConnection] connected');
+            this._retryCount = 0;
+        };
+
+        this._ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'session_init' && msg.session_id) {
+                    this._sessionId = msg.session_id;
+                }
+                const cb = this._callbacks[msg.type];
+                if (cb) cb(msg);
+            } catch (e) {
+                console.error('[AgentConnection] failed to parse message:', e);
+            }
+        };
+
+        this._ws.onclose = () => {
+            console.log('[AgentConnection] disconnected');
+            this.reconnect();
+        };
+    }
+
+    send(message) {
+        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            this._ws.send(JSON.stringify(message));
+        } else {
+            console.warn('[AgentConnection] cannot send, socket not open');
+        }
+    }
+
+    onToken(callback) { this._callbacks.token = callback; }
+    onWidget(callback) { this._callbacks.widget = callback; }
+    onDone(callback) { this._callbacks.done = callback; }
+    onError(callback) { this._callbacks.error = callback; }
+    onSessionInit(callback) { this._callbacks.session_init = callback; }
+
+    reconnect() {
+        if (this._retryCount >= this._maxRetries) {
+            console.error('[AgentConnection] max retries reached, giving up');
+            return;
+        }
+        const delay = this._retryDelays[this._retryCount] || this._retryDelays[this._retryDelays.length - 1];
+        this._retryCount++;
+        console.log(`[AgentConnection] reconnecting in ${delay}ms (attempt ${this._retryCount}/${this._maxRetries})`);
+        setTimeout(() => this._connect(), delay);
+    }
+
+    close() {
+        if (this._ws) {
+            this._ws.onclose = null; // prevent reconnect on intentional close
+            this._ws.close();
+            this._ws = null;
+        }
+    }
+}
+
+// ─── GridStack + UI helpers (unchanged) ───
+
 let grid;
+let agentConnection;
+let currentAssistantMessageDiv = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize the grid layout
     grid = GridStack.init({
-        cellHeight: 10, // 10px cells for fine-grained vertical resizing
+        cellHeight: 10,
         margin: 10,
-        minRow: 1, // Don't collapse when empty
-        float: true, // Allow widgets to be placed anywhere
-        handle: '.drag-handle', // Only drag from the dedicated grip to prevent click/drag conflict on Shadow DOM
+        minRow: 1,
+        float: true,
+        handle: '.drag-handle',
         resizable: {
-            handles: 'se' // Only show bottom-right resizer. Invisible perimeter resizers were overlapping and hijacking button clicks!
+            handles: 'se'
         }
     });
 
@@ -25,10 +118,39 @@ document.addEventListener('DOMContentLoaded', () => {
         iframes.forEach(iframe => iframe.style.pointerEvents = 'auto');
     });
 
+    // Initialize WebSocket connection
+    agentConnection = new AgentConnection();
+
+    agentConnection.onToken((msg) => {
+        if (!currentAssistantMessageDiv) {
+            currentAssistantMessageDiv = appendMessage('assistant', '');
+        }
+        currentAssistantMessageDiv.innerHTML += msg.content.replace(/\n/g, '<br>');
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+
+    agentConnection.onWidget((msg) => {
+        renderGenUIComponent(msg);
+    });
+
+    agentConnection.onDone(() => {
+        currentAssistantMessageDiv = null;
+        setTyping(false);
+    });
+
+    agentConnection.onError((msg) => {
+        appendMessage('system', `Error: ${msg.content}`);
+        setTyping(false);
+    });
+
+    agentConnection.onSessionInit((msg) => {
+        console.log('[Session] initialized with id:', msg.session_id);
+    });
+
     const chatForm = document.getElementById('chat-form');
     const messageInput = document.getElementById('message-input');
 
-    chatForm.addEventListener('submit', async (e) => {
+    chatForm.addEventListener('submit', (e) => {
         e.preventDefault();
         const message = messageInput.value.trim();
         if (!message) return;
@@ -47,7 +169,6 @@ const messageInput = document.getElementById('message-input');
 function appendMessage(role, content) {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${role}`;
-    // very basic markdown-to-br replacement for newlines in mock text
     msgDiv.innerHTML = content.replace(/\n/g, '<br>');
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -76,7 +197,6 @@ function renderGenUIComponent(componentData) {
         const widgetBody = activeWidgets[id].querySelector('.widget-body');
         if (widgetBody && widgetBody.shadowRoot) {
             widgetBody.shadowRoot.innerHTML = html;
-            // Execute scripts in the updated shadow DOM
             executeScriptsInElement(widgetBody.shadowRoot);
         }
         return;
@@ -85,11 +205,10 @@ function renderGenUIComponent(componentData) {
     // Default widget properties
     let widgetDef = {
         id: id,
-        w: gridOpts?.w || 4, // Default to 4/12 (33%) width
-        h: gridOpts?.h || 30, // Default to 300px height (1 cell = 10px)
-        minW: 2, // Min 2 columns wide
-        minH: 10, // Min 100px height
-        // GridStack auto-wraps this in .grid-stack-item-content, so we only put children here
+        w: gridOpts?.w || 4,
+        h: gridOpts?.h || 30,
+        minW: 2,
+        minH: 10,
         content: `
             <span class="drag-handle" title="Drag to Move">⋮⋮</span>
             <span class="widget-close" onclick="removeWidget('${id}')">✕</span>
@@ -97,7 +216,6 @@ function renderGenUIComponent(componentData) {
         `
     };
 
-    // If specific positions are provided, use them
     if (gridOpts?.x !== undefined) widgetDef.x = gridOpts.x;
     if (gridOpts?.y !== undefined) widgetDef.y = gridOpts.y;
 
@@ -105,8 +223,7 @@ function renderGenUIComponent(componentData) {
     const el = grid.addWidget(widgetDef);
     activeWidgets[id] = el;
 
-    // Isolate rendering using an Iframe instead of Shadow DOM
-    // This perfectly encapsulates globally-scoped JS like onclick="", which LLMs love to write
+    // Isolate rendering using an Iframe
     const newlyAddedBody = el.querySelector(`#body-${id}`);
     if (newlyAddedBody) {
         const iframe = document.createElement('iframe');
@@ -114,7 +231,7 @@ function renderGenUIComponent(componentData) {
         iframe.style.height = '100%';
         iframe.style.border = 'none';
         iframe.style.overflow = 'auto';
-        iframe.style.display = 'block'; // Prevent inline gap errors
+        iframe.style.display = 'block';
         iframe.style.borderRadius = '16px';
 
         const baseStyle = `
@@ -158,84 +275,24 @@ function removeWidget(id) {
     }
 }
 
-// Function that widgets can call to send events back to the backend
-// This effectively bridges the Widget UI logic back to the Agent
+// ─── Communication layer (WebSocket-based) ───
+
+// Widget event bridge: sends widget_event over WebSocket
 window.dispatchAgentEvent = function (eventName, payload) {
     console.log(`[Widget Event] ${eventName}:`, payload);
-    appendMessage('system', `Widget Event triggered: ${eventName}`);
-    sendMessage(JSON.stringify({ event: eventName, data: payload }), true);
+    if (agentConnection) {
+        agentConnection.send({
+            type: 'widget_event',
+            event_name: eventName,
+            payload: payload
+        });
+    }
 };
 
-async function sendMessage(text, isEvent = false) {
-    if (!isEvent) {
-        appendMessage('user', text);
-    }
+function sendMessage(text) {
+    appendMessage('user', text);
     setTyping(true);
-
-    try {
-        // We will hit the actual FastAPI endpoint
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ message: text })
-        });
-
-        if (!response.ok) {
-            throw new Error(`Server error: ${response.status}`);
-        }
-
-        // Initialize empty string for streaming text collector
-        let currentAssistantMessageDiv = null;
-
-        // Handle SSE Text stream
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-
-            // Process Server Sent Events line by line
-            let lines = buffer.split('\n');
-            // keep the last line if it's incomplete
-            buffer = lines.pop();
-
-            for (const line of lines) {
-                if (line.trim() === '') continue;
-                if (line.startsWith('data: ')) {
-                    const dataStr = line.substring(6).trim();
-                    if (dataStr === '[DONE]') {
-                        continue;
-                    }
-
-                    try {
-                        const evt = JSON.parse(dataStr);
-
-                        if (evt.type === 'message') {
-                            if (!currentAssistantMessageDiv) {
-                                currentAssistantMessageDiv = appendMessage('assistant', '');
-                            }
-                            // Append token
-                            currentAssistantMessageDiv.innerHTML += evt.content.replace(/\n/g, '<br>');
-                        } else if (evt.type === 'ui_component') {
-                            // Render GenUI component!
-                            renderGenUIComponent(evt.component);
-                        }
-                    } catch (e) {
-                        console.error('Error parsing stream data:', e, dataStr);
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        console.error('Chat error:', error);
-        appendMessage('system', `Error: ${error.message}`);
-    } finally {
-        setTyping(false);
+    if (agentConnection) {
+        agentConnection.send({ type: 'user_message', content: text });
     }
 }

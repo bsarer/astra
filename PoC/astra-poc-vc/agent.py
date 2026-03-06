@@ -55,31 +55,43 @@ def render_widget(id: str, html: str, width_percent: int, height_px: int) -> str
     CRITICAL: Always set height_px large enough so your widget doesn't require scrolling! (e.g. 400 or 500 for a calculator)"""
     return f"Widget {id} successfully rendered to the user's workspace."
 
+
 @tool
 def run_python_code(code: str) -> str:
     """Executes a python code snippet safely in an isolated environment (simulated).
     Use this to fulfill backend requirements on the fly (e.g. hitting an API, getting current time, doing math).
     The code should print() the final output you want to receive, or it should be the last expression."""
-    # For PoC, we are simply executing it via exec and capturing stdout.
     import sys
     from io import StringIO
-    
-    # Redirect stdout
-    old_stdout = sys.stdout
-    redirected_output = sys.stdout = StringIO()
-    
-    local_env = {}
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    TIMEOUT_SECONDS = 30
+
+    def _execute_code(code: str) -> str:
+        old_stdout = sys.stdout
+        redirected_output = sys.stdout = StringIO()
+        local_env = {}
+        try:
+            exec(code, {}, local_env)
+            output = redirected_output.getvalue()
+            if not output and 'result' in local_env:
+                output = str(local_env['result'])
+        except Exception as e:
+            output = f"Error executing code: {e}"
+        finally:
+            sys.stdout = old_stdout
+        return output
+
     try:
-        exec(code, {}, local_env)
-        output = redirected_output.getvalue()
-        if not output and 'result' in local_env:
-            output = str(local_env['result'])
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_execute_code, code)
+            return future.result(timeout=TIMEOUT_SECONDS)
+    except TimeoutError:
+        return f"Error: Code execution timed out after {TIMEOUT_SECONDS} seconds."
     except Exception as e:
-        output = f"Error executing code: {e}"
-    finally:
-        sys.stdout = old_stdout
-        
-    return output
+        return f"Error executing code: {e}"
+
+
 
 # Available tools
 tools = [run_python_code, install_python_packages, render_widget]

@@ -1,0 +1,11 @@
+# Astra PoC Configuration
+# Place this file next to the Astra executable or in the working directory.
+
+# Port the Docker container exposes (maps to container's internal port 8000)
+port = 8000
+
+# Docker container name
+container_name = "astra-agent"
+
+# Docker image name (must be built first: docker build -t astra-agent .)
+image_name = "astra-agent"
