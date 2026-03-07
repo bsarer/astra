@@ -1,37 +1,68 @@
 mod docker;
 
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Tauri v2 library entry point.
-/// Called from main.rs to build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
-            // Spawn Docker lifecycle on a background thread so setup doesn't block
+            // Don't use the default window from tauri.conf.json — we create our own
+            // so we can point it at an External URL (the Docker container).
+            // First, show a loading window while Docker starts.
+            let loading_html = include_str!("loading.html");
+            let loading_url = format!(
+                "data:text/html,{}",
+                urlencoding::encode(loading_html)
+            );
+
+            let _loading_win = WebviewWindowBuilder::new(
+                &app_handle,
+                "main",
+                WebviewUrl::External(loading_url.parse().unwrap()),
+            )
+            .title("Astra")
+            .inner_size(1400.0, 900.0)
+            .build()?;
+
+            // Spawn Docker lifecycle on a background thread
             std::thread::spawn(move || {
                 let config = docker::Config::load();
+                eprintln!("[Astra] Config loaded: port={}", config.port);
+
                 let container = docker::DockerManager::new(config);
 
-                // Check if container is running, start if not
                 if let Err(e) = container.ensure_running() {
+                    eprintln!("[Astra] Docker error: {}", e);
                     show_error_dialog(&format!("Failed to start Docker container: {}", e));
                     return;
                 }
 
-                // Poll /health until ready (60s timeout)
+                eprintln!("[Astra] Container running, waiting for health check...");
+
                 match container.wait_for_health() {
                     Ok(()) => {
                         let url = container.frontend_url();
-                        // Load the external URL in the webview
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.navigate(url.parse().unwrap());
-                            let _ = window.show();
+                        eprintln!("[Astra] Health check passed, loading {}", url);
+
+                        // Close loading window and open the real one pointing at Docker
+                        if let Some(win) = app_handle.get_webview_window("main") {
+                            let _ = win.close();
                         }
+
+                        let _ = WebviewWindowBuilder::new(
+                            &app_handle,
+                            "main-app",
+                            WebviewUrl::External(url.parse().unwrap()),
+                        )
+                        .title("Astra")
+                        .inner_size(1400.0, 900.0)
+                        .build();
                     }
                     Err(e) => {
+                        eprintln!("[Astra] Health check failed: {}", e);
                         show_error_dialog(&format!(
                             "Docker container failed health check (60s timeout): {}",
                             e

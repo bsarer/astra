@@ -74,6 +74,7 @@
             margin-bottom: 24px;
             display: flex;
             align-items: center;
+            justify-content: space-between;
         }
 
         .workspace-header h2 {
@@ -164,6 +165,169 @@
         .widget-close:hover {
             color: #ef4444;
             background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* Widget pin button */
+        .widget-pin {
+            position: absolute;
+            top: 10px;
+            right: 40px;
+            cursor: pointer;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            font-size: 12px;
+            opacity: 0;
+            z-index: 100;
+            filter: grayscale(1);
+        }
+
+        .grid-stack-item-content:hover .widget-pin {
+            opacity: 1;
+        }
+
+        .widget-pin.pinned {
+            opacity: 1;
+            filter: grayscale(0);
+            background: rgba(59, 130, 246, 0.4);
+        }
+
+        .widget-pinned {
+            border-color: rgba(59, 130, 246, 0.3) !important;
+        }
+
+        /* Debug toggle button */
+        .debug-toggle-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-light);
+            background: var(--bg-surface-solid);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .debug-toggle-btn:hover,
+        .debug-toggle-btn.active {
+            color: var(--brand-primary);
+            border-color: var(--brand-primary);
+        }
+
+        .debug-badge {
+            background: var(--brand-primary);
+            color: #fff;
+            font-size: 10px;
+            min-width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 0 4px;
+            line-height: 16px;
+            text-align: center;
+        }
+
+        /* Debug panel */
+        .debug-panel {
+            width: 100%;
+            max-height: 0;
+            overflow: hidden;
+            background: var(--bg-surface-solid);
+            border: 1px solid var(--border-light);
+            border-radius: 12px;
+            box-shadow: var(--glass-shadow);
+            margin-bottom: 16px;
+            transition: max-height 0.3s ease, opacity 0.3s ease;
+            opacity: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .debug-panel.open {
+            max-height: 280px;
+            opacity: 1;
+        }
+
+        .debug-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-light);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .debug-clear-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            transition: all 0.15s;
+        }
+
+        .debug-clear-btn:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-secondary);
+        }
+
+        .debug-log {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px 0;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.72rem;
+            line-height: 1.5;
+            max-height: 220px;
+        }
+
+        .debug-entry {
+            padding: 3px 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: default;
+            transition: background 0.1s;
+        }
+
+        .debug-entry:hover {
+            background: rgba(255, 255, 255, 0.03);
+            white-space: normal;
+            word-break: break-all;
+        }
+
+        .debug-time {
+            color: var(--text-muted);
+        }
+
+        .debug-send .debug-arrow {
+            color: #f59e0b;
+        }
+
+        .debug-recv .debug-arrow {
+            color: #10b981;
+        }
+
+        .debug-body {
+            color: var(--text-secondary);
         }
 
         /* Hide resize handle by default, show on hover */
@@ -416,6 +580,17 @@
         <main class="workspace-panel">
             <div class="workspace-header">
                 <h2>ASTRA</h2>
+                <button class="debug-toggle-btn" id="debug-toggle" title="Show Debug Panel" onclick="DebugPanel.toggle()">
+                    🐛 Debug
+                    <span class="debug-badge" id="debug-badge"></span>
+                </button>
+            </div>
+            <div class="debug-panel" id="debug-panel">
+                <div class="debug-header">
+                    <span>WebSocket Messages</span>
+                    <button class="debug-clear-btn" id="debug-clear" onclick="DebugPanel.clear()">Clear</button>
+                </div>
+                <div class="debug-log" id="debug-log"></div>
             </div>
             <div class="grid-stack">
                 <!-- Widgets will be dynamically injected here -->

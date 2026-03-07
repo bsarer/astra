@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -24,6 +25,24 @@ from models import (
 
 # Load environment variables
 load_dotenv()
+
+# Debug mode: set DEBUG=1 in .env to log all WS messages
+DEBUG = os.getenv("DEBUG", "0") == "1"
+logger = logging.getLogger("astra")
+if DEBUG:
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+    logger.setLevel(logging.DEBUG)
+    logger.debug("Debug mode enabled — all WebSocket messages will be logged")
+
+
+def _debug_send(session_id: str, data: str):
+    if DEBUG:
+        logger.debug("WS ⬆ [%s] %s", session_id, data[:300])
+
+
+def _debug_recv(session_id: str, data: str):
+    if DEBUG:
+        logger.debug("WS ⬇ [%s] %s", session_id, data[:300])
 
 # App-level readiness flag for health check (Req 7.3)
 _ready = False
@@ -67,11 +86,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
 
     # Send session_init message on connect
     init_msg: SessionInitMessage = {"type": "session_init", "session_id": sid}
-    await websocket.send_text(serialize_server_message(init_msg))
+    payload = serialize_server_message(init_msg)
+    _debug_send(sid, payload)
+    await websocket.send_text(payload)
 
     try:
         while True:
             raw = await websocket.receive_text()
+            _debug_recv(sid, raw)
 
             # Parse incoming message (Req 1.7 — malformed JSON)
             try:

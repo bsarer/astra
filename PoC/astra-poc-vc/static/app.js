@@ -1,3 +1,85 @@
+// ─── Debug Panel ───
+
+const DebugPanel = {
+    _enabled: false,
+    _panel: null,
+    _log: null,
+    _badge: null,
+    _msgCount: 0,
+    _buffer: [],
+
+    init() {
+        this._panel = document.getElementById('debug-panel');
+        this._log = document.getElementById('debug-log');
+        this._badge = document.getElementById('debug-badge');
+
+        // Flush any messages that arrived before init
+        if (this._log && this._buffer.length) {
+            this._buffer.forEach(b => this._appendEntry(b.direction, b.data));
+            this._buffer = [];
+        }
+    },
+
+    toggle() {
+        this._enabled = !this._enabled;
+        if (this._panel) {
+            this._panel.classList.toggle('open', this._enabled);
+        }
+        const btn = document.getElementById('debug-toggle');
+        if (btn) {
+            btn.classList.toggle('active', this._enabled);
+            btn.title = this._enabled ? 'Hide Debug Panel' : 'Show Debug Panel';
+        }
+    },
+
+    log(direction, data) {
+        if (!this._log) {
+            // Buffer until init runs
+            this._buffer.push({ direction, data });
+            return;
+        }
+        this._appendEntry(direction, data);
+    },
+
+    _appendEntry(direction, data) {
+        this._msgCount++;
+        const time = new Date().toLocaleTimeString('en-US', {
+            hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3
+        });
+        const arrow = direction === 'send' ? '⬆' : '⬇';
+        const cls = direction === 'send' ? 'debug-send' : 'debug-recv';
+        const raw = typeof data === 'string' ? data : JSON.stringify(data);
+        const preview = raw.length > 300 ? raw.slice(0, 300) + '…' : raw;
+
+        const entry = document.createElement('div');
+        entry.className = `debug-entry ${cls}`;
+        entry.innerHTML =
+            `<span class="debug-time">${time}</span> ` +
+            `<span class="debug-arrow">${arrow}</span> ` +
+            `<span class="debug-body">${this._esc(preview)}</span>`;
+        entry.title = raw;
+        this._log.appendChild(entry);
+        this._log.scrollTop = this._log.scrollHeight;
+
+        if (this._badge) {
+            this._badge.textContent = this._msgCount;
+            this._badge.style.display = 'inline-block';
+        }
+    },
+
+    clear() {
+        if (this._log) this._log.innerHTML = '';
+        this._msgCount = 0;
+        if (this._badge) this._badge.style.display = 'none';
+    },
+
+    _esc(str) {
+        const d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
+    }
+};
+
 // ─── AgentConnection: WebSocket client with reconnect ───
 
 class AgentConnection {
@@ -38,6 +120,7 @@ class AgentConnection {
         this._ws.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
+                DebugPanel.log('recv', msg);
                 if (msg.type === 'session_init' && msg.session_id) {
                     this._sessionId = msg.session_id;
                 }
@@ -56,6 +139,7 @@ class AgentConnection {
 
     send(message) {
         if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            DebugPanel.log('send', message);
             this._ws.send(JSON.stringify(message));
         } else {
             console.warn('[AgentConnection] cannot send, socket not open');
@@ -95,6 +179,9 @@ let agentConnection;
 let currentAssistantMessageDiv = null;
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Initialize debug panel
+    DebugPanel.init();
+
     // Initialize the grid layout
     grid = GridStack.init({
         cellHeight: 10,
@@ -186,6 +273,8 @@ function setTyping(isTyping) {
 
 // Global registry to store references to active widgets
 const activeWidgets = {};
+// Track pinned state per widget
+const pinnedWidgets = {};
 
 // Function to handle GenUI components
 function renderGenUIComponent(componentData) {
@@ -211,6 +300,7 @@ function renderGenUIComponent(componentData) {
         minH: 10,
         content: `
             <span class="drag-handle" title="Drag to Move">⋮⋮</span>
+            <span class="widget-pin" onclick="togglePin('${id}')" title="Pin widget">📌</span>
             <span class="widget-close" onclick="removeWidget('${id}')">✕</span>
             <div class="widget-body" id="body-${id}"></div>
         `
@@ -272,7 +362,26 @@ function removeWidget(id) {
     if (activeWidgets[id]) {
         grid.removeWidget(activeWidgets[id]);
         delete activeWidgets[id];
+        delete pinnedWidgets[id];
     }
+}
+
+function togglePin(id) {
+    const el = activeWidgets[id];
+    if (!el) return;
+    const isPinned = !pinnedWidgets[id];
+    pinnedWidgets[id] = isPinned;
+
+    // Lock/unlock the widget in GridStack
+    grid.update(el, { noMove: isPinned, noResize: isPinned });
+
+    // Visual feedback
+    const pinBtn = el.querySelector('.widget-pin');
+    if (pinBtn) {
+        pinBtn.classList.toggle('pinned', isPinned);
+        pinBtn.title = isPinned ? 'Unpin widget' : 'Pin widget';
+    }
+    el.querySelector('.grid-stack-item-content')?.classList.toggle('widget-pinned', isPinned);
 }
 
 // ─── Communication layer (WebSocket-based) ───

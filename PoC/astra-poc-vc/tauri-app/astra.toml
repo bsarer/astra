@@ -2,7 +2,7 @@
 # Place this file next to the Astra executable or in the working directory.
 
 # Port the Docker container exposes (maps to container's internal port 8000)
-port = 8000
+port = 7100
 
 # Docker container name
 container_name = "astra-agent"

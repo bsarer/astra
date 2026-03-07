@@ -33,6 +33,15 @@ wheels/
 .coverage
 htmlcov/
 
+# Tauri / Rust
+tauri-app/src-tauri/target/
+tauri-app/src-tauri/gen/schemas/
+Cargo.lock
+
+# Docker
+*.tar
+docker-compose.override.yml
+
 # Editor / OS
 .vscode/
 .idea/
@@ -40,3 +49,6 @@ htmlcov/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Node (if any)
+node_modules/

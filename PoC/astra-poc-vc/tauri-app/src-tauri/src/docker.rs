@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -43,13 +44,14 @@ impl Config {
     /// Load configuration from `astra.toml` in the current directory or next to the executable.
     /// Falls back to defaults if the file doesn't exist.
     pub fn load() -> Self {
-        // Try loading from current directory first, then next to executable
+        // CARGO_MANIFEST_DIR = .../tauri-app/src-tauri at compile time
+        // astra.toml lives at .../tauri-app/astra.toml (one level up)
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
         let paths = [
+            manifest_dir.join("../astra.toml"),  // src-tauri -> tauri-app
             std::path::PathBuf::from("astra.toml"),
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("astra.toml")))
-                .unwrap_or_default(),
+            std::path::PathBuf::from("../astra.toml"),
         ];
 
         for path in &paths {
@@ -69,16 +71,108 @@ impl Config {
 /// Manages the Docker container lifecycle for the Astra agent backend.
 pub struct DockerManager {
     config: Config,
+    env_vars: HashMap<String, String>,
 }
 
 impl DockerManager {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        let env_vars = Self::load_env_file();
+        Self { config, env_vars }
+    }
+
+    /// Load environment variables from the .env file in the astra-poc-vc directory.
+    fn load_env_file() -> HashMap<String, String> {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let candidates = [
+            manifest_dir.join("../../.env"),     // src-tauri -> tauri-app -> astra-poc-vc
+            std::path::PathBuf::from("../../.env"),
+            std::path::PathBuf::from("../.env"),
+            std::path::PathBuf::from(".env"),
+        ];
+
+        for path in &candidates {
+            if path.exists() {
+                eprintln!("[Astra] Loading .env from: {:?}", path);
+                let mut vars = HashMap::new();
+                if let Ok(iter) = dotenvy::from_path_iter(path) {
+                    for item in iter {
+                        if let Ok((key, value)) = item {
+                            vars.insert(key, value);
+                        }
+                    }
+                }
+                return vars;
+            }
+        }
+
+        eprintln!("[Astra] Warning: No .env file found, relying on host environment variables");
+        HashMap::new()
+    }
+
+    /// Get an env var, preferring the .env file, falling back to host env.
+    fn get_env(&self, key: &str) -> Option<String> {
+        self.env_vars.get(key).cloned().or_else(|| std::env::var(key).ok())
     }
 
     /// Returns the frontend URL served by the Docker container.
     pub fn frontend_url(&self) -> String {
         format!("http://localhost:{}/", self.config.port)
+    }
+
+    /// Check if the Docker image exists locally.
+    fn image_exists(&self) -> bool {
+        let output = Command::new("docker")
+            .args(["image", "inspect", &self.config.image_name])
+            .output();
+        matches!(output, Ok(o) if o.status.success())
+    }
+
+    /// Build the Docker image from the Dockerfile if it doesn't exist.
+    fn build_if_needed(&self) -> Result<(), String> {
+        if self.image_exists() {
+            return Ok(());
+        }
+
+        let build_context = self.find_build_context()
+            .ok_or_else(|| "Could not find Dockerfile. Ensure it exists in the astra-poc-vc directory.".to_string())?;
+
+        let output = Command::new("docker")
+            .args(["build", "-t", &self.config.image_name, "."])
+            .current_dir(&build_context)
+            .output()
+            .map_err(|e| format!("Failed to execute docker build: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("docker build failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Find the directory containing the Dockerfile.
+    fn find_build_context(&self) -> Option<std::path::PathBuf> {
+        // Compile-time path: CARGO_MANIFEST_DIR = .../tauri-app/src-tauri
+        // Dockerfile is at .../astra-poc-vc/Dockerfile (two levels up)
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        let candidates = [
+            manifest_dir.join("../.."),          // src-tauri -> tauri-app -> astra-poc-vc
+            std::path::PathBuf::from(".."),      // if cwd is tauri-app
+            std::path::PathBuf::from("../.."),   // if cwd is src-tauri
+            std::path::PathBuf::from("."),        // if cwd is astra-poc-vc
+        ];
+
+        for candidate in &candidates {
+            if candidate.join("Dockerfile").exists() {
+                // Canonicalize to get a clean absolute path
+                if let Ok(abs) = candidate.canonicalize() {
+                    return Some(abs);
+                }
+                return Some(candidate.clone());
+            }
+        }
+        None
     }
 
     /// Check if the container is already running.
@@ -98,6 +192,9 @@ impl DockerManager {
 
     /// Start the Docker container with security flags and env vars.
     fn start(&self) -> Result<(), String> {
+        // Build the image first if it doesn't exist locally
+        self.build_if_needed()?;
+
         // Remove any stopped container with the same name first
         let _ = Command::new("docker")
             .args(["rm", "-f", &self.config.container_name])
@@ -115,15 +212,12 @@ impl DockerManager {
             "-p", &port_mapping,
         ]);
 
-        // Pass through environment variables if set on the host
-        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-            cmd.args(["-e", &format!("OPENAI_API_KEY={}", api_key)]);
-        }
-        if let Ok(model) = std::env::var("OPENAI_MODEL") {
-            cmd.args(["-e", &format!("OPENAI_MODEL={}", model)]);
-        }
-        if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
-            cmd.args(["-e", &format!("OPENAI_BASE_URL={}", base_url)]);
+        // Pass through environment variables from .env file or host
+        let env_keys = ["OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "DEBUG"];
+        for key in &env_keys {
+            if let Some(value) = self.get_env(key) {
+                cmd.args(["-e", &format!("{}={}", key, value)]);
+            }
         }
 
         cmd.arg(&self.config.image_name);
