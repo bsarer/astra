@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "identifier": "com.astra.poc",
   "build": {
+    "devUrl": "http://localhost:7100",
     "frontendDist": "../dist"
   },
   "app": {
@@ -13,8 +14,7 @@
         "width": 1400,
         "height": 900,
         "resizable": true,
-        "fullscreen": false,
-        "visible": false
+        "fullscreen": false
       }
     ],
     "security": {
