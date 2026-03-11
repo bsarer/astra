@@ -1,0 +1,32 @@
+{
+  "name": "Mike Astra",
+  "age": 35,
+  "nationality": "American",
+  "job_title": "Sales Manager",
+  "company": "Vertex Solutions Inc.",
+  "industry": "B2B SaaS",
+  "location": "Austin, TX",
+  "timezone": "America/Chicago",
+  "interests": ["traveling", "hiking", "craft beer", "college football", "photography"],
+  "travel_destinations_visited": ["Japan", "Portugal", "Costa Rica", "Iceland", "Thailand"],
+  "travel_upcoming": ["Italy", "New Zealand"],
+  "personality": "Outgoing, goal-driven, organized but casual in tone. Uses short emails. Prefers bullet points over long paragraphs.",
+  "communication_style": "Friendly and direct. Signs off with 'Best,' or 'Cheers,'. Uses first names.",
+  "work_details": {
+    "team_size": 8,
+    "reports_to": "VP of Sales",
+    "direct_reports": ["Sarah Chen", "Jake Morrison", "Priya Patel"],
+    "key_clients": ["Acme Corp", "BluePeak Industries", "NovaTech"],
+    "quarterly_target": "$1.2M",
+    "crm": "Salesforce"
+  },
+  "contacts": [
+    {"name": "Sarah Chen", "email": "sarah.chen@vertexsolutions.com", "role": "Account Executive"},
+    {"name": "Jake Morrison", "email": "jake.morrison@vertexsolutions.com", "role": "Account Executive"},
+    {"name": "Priya Patel", "email": "priya.patel@vertexsolutions.com", "role": "SDR Lead"},
+    {"name": "Lisa Park", "email": "lisa.park@vertexsolutions.com", "role": "VP of Sales"},
+    {"name": "Tom Bradley", "email": "tom.bradley@acmecorp.com", "role": "Procurement Director"},
+    {"name": "Rachel Kim", "email": "rachel.kim@bluepeak.com", "role": "CTO"},
+    {"name": "Dave Wilson", "email": "dave.wilson@novatech.io", "role": "Head of Engineering"}
+  ]
+}

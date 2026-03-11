@@ -2,10 +2,17 @@ services:
   astra-agent:
     build: .
     ports:
-      - "8000:8000"
+      - "7100:8000"
+    volumes:
+      - ../data:/app/data
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - MIKE_EMAIL=${MIKE_EMAIL}
+      - MIKE_EMAIL_PASSWORD=${MIKE_EMAIL_PASSWORD}
+      - MIKE_EMAIL_PROVIDER=${MIKE_EMAIL_PROVIDER}
+      - DATA_PROVIDER=${DATA_PROVIDER}
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -212,8 +212,18 @@ impl DockerManager {
             "-p", &port_mapping,
         ]);
 
+        // Mount the data directory for mock persona data
+        if let Some(build_ctx) = self.find_build_context() {
+            let data_dir = build_ctx.join("../data");
+            if let Ok(abs_data) = data_dir.canonicalize() {
+                let volume = format!("{}:/app/data:ro", abs_data.display());
+                cmd.args(["-v", &volume]);
+            }
+        }
+
         // Pass through environment variables from .env file or host
-        let env_keys = ["OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "DEBUG"];
+        let env_keys = ["OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "DEBUG",
+                        "DATA_PROVIDER", "MIKE_EMAIL", "MIKE_EMAIL_PASSWORD", "MIKE_EMAIL_PROVIDER"];
         for key in &env_keys {
             if let Some(value) = self.get_env(key) {
                 cmd.args(["-e", &format!("{}={}", key, value)]);

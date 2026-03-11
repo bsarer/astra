@@ -1,0 +1,112 @@
+[
+  {
+    "id": 1,
+    "from": "mike.astraos@gmail.com",
+    "to": "sarah.chen@vertexsolutions.com",
+    "subject": "Acme Corp renewal - prep for Thursday",
+    "body": "Hey Sarah,\n\nQuick heads up — Acme renewal call is Thursday at 2pm CT. Can you pull the usage report from Salesforce and have it ready by Wednesday EOD?\n\nAlso, Tom mentioned they might want to add 50 seats. Let's come prepared with tiered pricing.\n\nBest,\nMike",
+    "date": "2026-03-06T09:15:00-06:00",
+    "labels": ["work", "clients", "acme"],
+    "read": true
+  },
+  {
+    "id": 2,
+    "from": "tom.bradley@acmecorp.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Re: Q2 expansion discussion",
+    "body": "Mike,\n\nThanks for sending over the proposal. The team reviewed it and we're generally aligned. A few questions:\n\n1. Can we get volume discount on the 50 additional seats?\n2. What's the onboarding timeline look like?\n3. Is there flexibility on the payment terms?\n\nLet's discuss Thursday.\n\nBest,\nTom",
+    "date": "2026-03-06T14:30:00-06:00",
+    "labels": ["work", "clients", "acme"],
+    "read": true
+  },
+  {
+    "id": 3,
+    "from": "lisa.park@vertexsolutions.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Q1 pipeline review - Monday 10am",
+    "body": "Hi Mike,\n\nReminder that we have the Q1 pipeline review Monday at 10am. Please have your team's numbers updated in Salesforce by Friday.\n\nI'd also like to discuss the BluePeak deal — it's been in negotiation for 6 weeks now. What's the blocker?\n\nThanks,\nLisa",
+    "date": "2026-03-07T08:00:00-06:00",
+    "labels": ["work", "internal"],
+    "read": true
+  },
+  {
+    "id": 4,
+    "from": "jake.morrison@vertexsolutions.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "NovaTech demo went great",
+    "body": "Mike!\n\nJust wrapped the NovaTech demo with Dave Wilson. He was really impressed with the API integration story. He wants to loop in their Head of Product for a follow-up next week.\n\nI think this could close by end of March if we move fast.\n\n- Jake",
+    "date": "2026-03-07T16:45:00-06:00",
+    "labels": ["work", "clients", "novatech"],
+    "read": false
+  },
+  {
+    "id": 5,
+    "from": "mike.astraos@gmail.com",
+    "to": "rachel.kim@bluepeak.com",
+    "subject": "BluePeak - moving forward",
+    "body": "Hi Rachel,\n\nWanted to follow up on our last conversation. I understand the security review is taking longer than expected. Happy to set up a call with our security team to address any concerns directly.\n\nWould next Tuesday work for a 30-min call?\n\nCheers,\nMike",
+    "date": "2026-03-08T10:20:00-06:00",
+    "labels": ["work", "clients", "bluepeak"],
+    "read": true
+  },
+  {
+    "id": 6,
+    "from": "priya.patel@vertexsolutions.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "March SDR metrics + new leads",
+    "body": "Hi Mike,\n\nHere's the weekly SDR update:\n\n- 47 new MQLs this week (up 12% from last week)\n- 18 meetings booked\n- 3 enterprise leads worth flagging: Meridian Health, Coastal Logistics, FinBridge Capital\n\nI'll add details to Salesforce by EOD. Let me know if you want to discuss any of these.\n\nBest,\nPriya",
+    "date": "2026-03-08T11:00:00-06:00",
+    "labels": ["work", "internal", "pipeline"],
+    "read": false
+  },
+  {
+    "id": 7,
+    "from": "booking@finnair.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Your Helsinki Adventure Awaits! ✈️ Confirmation #AY7829104",
+    "body": "Dear Mike Astra,\n\nYour flight to Finland is confirmed!\n\n✈️ OUTBOUND\nAustin (AUS) → Helsinki (HEL)\nMarch 13, 2026 — Finnair AY 6142\nDeparture: 4:30 PM CDT\nArrival: 11:15 AM (next day) EET\n\n✈️ RETURN\nHelsinki (HEL) → Austin (AUS)\nMarch 17, 2026 — Finnair AY 6143\nDeparture: 1:45 PM EET\nArrival: 6:20 PM CDT\n\nYour booking includes:\n• 1 checked bag (23kg)\n• Seat selection: 14A (window)\n• In-flight meals\n\nManage your booking at finnair.com/manage\n\nHave a wonderful trip to Finland! 🇫🇮",
+    "date": "2026-03-08T14:00:00-06:00",
+    "labels": ["travel", "personal", "finland"],
+    "read": false
+  },
+  {
+    "id": 8,
+    "from": "reservations@hotelkamp.fi",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Hotel Kämp Helsinki - Reservation Confirmed",
+    "body": "Dear Mr. Astra,\n\nThank you for choosing Hotel Kämp, Helsinki's most iconic luxury hotel.\n\nRESERVATION DETAILS:\n• Check-in: March 14, 2026 (from 3:00 PM)\n• Check-out: March 17, 2026 (by 12:00 PM)\n• Room: Superior Room with City View\n• Rate: €285/night (breakfast included)\n• Confirmation: HK-2026-78291\n\nHotel Kämp is located in the heart of Helsinki, steps from the Esplanade Park and Senate Square.\n\nAMENITIES:\n• Complimentary WiFi\n• Kämp Spa & Fitness Center\n• Kämp Bar (award-winning cocktails)\n• Concierge service\n\nWe look forward to welcoming you!\n\nWarm regards,\nHotel Kämp Reservations Team\nPohjoisesplanadi 29, 00100 Helsinki",
+    "date": "2026-03-08T15:30:00-06:00",
+    "labels": ["travel", "personal", "finland"],
+    "read": false
+  },
+  {
+    "id": 9,
+    "from": "tours@visitfinland.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Your Northern Lights Tour is Booked! 🌌",
+    "body": "Hi Mike!\n\nGreat news — your Northern Lights photography tour is confirmed!\n\n🌌 AURORA HUNTING EXPERIENCE\nDate: March 15, 2026\nTime: 8:00 PM - 2:00 AM\nPickup: Hotel Kämp lobby\n\nWHAT'S INCLUDED:\n• Professional aurora guide & photographer\n• Thermal suits and boots\n• Hot drinks and snacks\n• Transportation to prime viewing locations\n• Photography tips for capturing the lights\n\nWEATHER NOTE:\nMarch is excellent for aurora viewing in Finland! Current forecast shows clear skies and high aurora activity (Kp index 4-5) expected.\n\nDress warmly — temperatures will be around -5°C to -10°C.\n\nCan't wait to show you the magic of the Finnish night sky!\n\nBest,\nVisit Finland Tours\nBooking ref: VFT-2026-4821",
+    "date": "2026-03-09T09:00:00-06:00",
+    "labels": ["travel", "personal", "finland"],
+    "read": false
+  },
+  {
+    "id": 10,
+    "from": "mike.astraos@gmail.com",
+    "to": "dave.wilson@novatech.io",
+    "subject": "Great meeting today",
+    "body": "Dave,\n\nReally enjoyed the conversation today. Jake mentioned you'd like to bring in your Head of Product — we'd love that. How does next Wednesday or Thursday look?\n\nAlso, if you're ever in Austin, first round of craft beer is on me.\n\nCheers,\nMike",
+    "date": "2026-03-07T17:30:00-06:00",
+    "labels": ["work", "clients", "novatech"],
+    "read": true
+  },
+  {
+    "id": 11,
+    "from": "noreply@tripadvisor.com",
+    "to": "mike.astraos@gmail.com",
+    "subject": "Top Things to Do in Helsinki - Your Trip Guide",
+    "body": "Hi Mike,\n\nYou're going to Helsinki! Here are the top experiences travelers love:\n\n🏛️ MUST-SEE ATTRACTIONS:\n1. Suomenlinna Sea Fortress (UNESCO World Heritage)\n2. Helsinki Cathedral & Senate Square\n3. Temppeliaukio Church (Rock Church)\n4. Market Square & Old Market Hall\n5. Design District Helsinki\n\n🍽️ FOOD & DRINK:\n• Try traditional Finnish salmon soup (lohikeitto)\n• Visit a Finnish sauna (it's a must!)\n• Sample local craft beers at Bryggeri Helsinki\n• Coffee culture — Finns drink the most coffee per capita!\n\n📸 PHOTOGRAPHY SPOTS:\n• Oodi Central Library (stunning architecture)\n• Allas Sea Pool at sunset\n• Kallio neighborhood street art\n\nEnjoy your trip!\nTripAdvisor Team",
+    "date": "2026-03-09T10:30:00-06:00",
+    "labels": ["travel", "personal", "finland"],
+    "read": true
+  }
+]

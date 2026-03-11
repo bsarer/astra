@@ -1,0 +1,141 @@
+[
+  {
+    "id": "cal-001",
+    "title": "Q1 Pipeline Review",
+    "start": "2026-03-09T10:00:00-06:00",
+    "end": "2026-03-09T11:00:00-06:00",
+    "location": "Zoom",
+    "attendees": ["mike.astraos@gmail.com", "lisa.park@vertexsolutions.com", "sarah.chen@vertexsolutions.com", "jake.morrison@vertexsolutions.com", "priya.patel@vertexsolutions.com"],
+    "description": "Weekly pipeline review with VP of Sales. Bring updated Salesforce numbers.",
+    "recurring": "weekly",
+    "color": "#3b82f6"
+  },
+  {
+    "id": "cal-002",
+    "title": "Acme Corp Renewal Call",
+    "start": "2026-03-11T14:00:00-06:00",
+    "end": "2026-03-11T15:00:00-06:00",
+    "location": "Zoom",
+    "attendees": ["mike.astraos@gmail.com", "sarah.chen@vertexsolutions.com", "tom.bradley@acmecorp.com"],
+    "description": "Discuss Q2 renewal + 50 seat expansion. Have tiered pricing ready.",
+    "color": "#f59e0b"
+  },
+  {
+    "id": "cal-003",
+    "title": "BluePeak Security Review Call",
+    "start": "2026-03-12T11:00:00-06:00",
+    "end": "2026-03-12T11:30:00-06:00",
+    "location": "Google Meet",
+    "attendees": ["mike.astraos@gmail.com", "rachel.kim@bluepeak.com"],
+    "description": "Address BluePeak's security concerns. Loop in Vertex security team if needed.",
+    "status": "tentative",
+    "color": "#ef4444"
+  },
+  {
+    "id": "cal-011",
+    "title": "✈️ Flight to Helsinki",
+    "start": "2026-03-13T16:30:00-06:00",
+    "end": "2026-03-14T11:15:00+02:00",
+    "location": "AUS → HEL (Finnair AY 6142)",
+    "description": "Finland trip! 4 days. Seat 14A (window). Confirmation: AY7829104",
+    "color": "#06b6d4"
+  },
+  {
+    "id": "cal-012",
+    "title": "🇫🇮 Helsinki - Day 1",
+    "start": "2026-03-14T15:00:00+02:00",
+    "end": "2026-03-14T23:00:00+02:00",
+    "location": "Hotel Kämp, Helsinki",
+    "description": "Check-in at Hotel Kämp (3 PM). Explore Esplanade Park, Senate Square. Dinner at Market Square.",
+    "color": "#06b6d4"
+  },
+  {
+    "id": "cal-013",
+    "title": "🌌 Northern Lights Tour",
+    "start": "2026-03-15T20:00:00+02:00",
+    "end": "2026-03-16T02:00:00+02:00",
+    "location": "Pickup: Hotel Kämp lobby",
+    "description": "Aurora hunting photography tour. Thermal suits provided. Bring camera! Booking: VFT-2026-4821",
+    "color": "#8b5cf6"
+  },
+  {
+    "id": "cal-014",
+    "title": "🇫🇮 Helsinki - Suomenlinna & Sauna",
+    "start": "2026-03-16T10:00:00+02:00",
+    "end": "2026-03-16T18:00:00+02:00",
+    "location": "Suomenlinna Sea Fortress",
+    "description": "Ferry to Suomenlinna (UNESCO site). Traditional Finnish sauna in the evening. Try local craft beers.",
+    "color": "#06b6d4"
+  },
+  {
+    "id": "cal-015",
+    "title": "✈️ Return Flight Helsinki → Austin",
+    "start": "2026-03-17T13:45:00+02:00",
+    "end": "2026-03-17T18:20:00-06:00",
+    "location": "HEL → AUS (Finnair AY 6143)",
+    "description": "Check-out Hotel Kämp by 12 PM. Flight home.",
+    "color": "#06b6d4"
+  },
+  {
+    "id": "cal-005",
+    "title": "Team 1:1 - Sarah",
+    "start": "2026-03-10T09:00:00-06:00",
+    "end": "2026-03-10T09:30:00-06:00",
+    "location": "Office",
+    "attendees": ["mike.astraos@gmail.com", "sarah.chen@vertexsolutions.com"],
+    "description": "Weekly 1:1. Discuss Acme prep and Q1 close strategy.",
+    "recurring": "weekly",
+    "color": "#8b5cf6"
+  },
+  {
+    "id": "cal-006",
+    "title": "Team 1:1 - Jake",
+    "start": "2026-03-10T09:30:00-06:00",
+    "end": "2026-03-10T10:00:00-06:00",
+    "location": "Office",
+    "attendees": ["mike.astraos@gmail.com", "jake.morrison@vertexsolutions.com"],
+    "description": "Weekly 1:1. NovaTech progress and new pipeline.",
+    "recurring": "weekly",
+    "color": "#8b5cf6"
+  },
+  {
+    "id": "cal-007",
+    "title": "Team 1:1 - Priya",
+    "start": "2026-03-10T10:00:00-06:00",
+    "end": "2026-03-10T10:30:00-06:00",
+    "location": "Office",
+    "attendees": ["mike.astraos@gmail.com", "priya.patel@vertexsolutions.com"],
+    "description": "Weekly 1:1. SDR metrics review and lead quality discussion.",
+    "recurring": "weekly",
+    "color": "#8b5cf6"
+  },
+  {
+    "id": "cal-008",
+    "title": "Gym - CrossFit",
+    "start": "2026-03-09T06:30:00-06:00",
+    "end": "2026-03-09T07:30:00-06:00",
+    "location": "Austin CrossFit",
+    "description": "Morning workout",
+    "recurring": "mon,wed,fri",
+    "color": "#64748b"
+  },
+  {
+    "id": "cal-009",
+    "title": "Flight to Rome",
+    "start": "2026-04-18T18:15:00-06:00",
+    "end": "2026-04-19T11:40:00+02:00",
+    "location": "AUS → FCO (Delta DL 472)",
+    "description": "Italy vacation. 9 days. Return April 27.",
+    "color": "#06b6d4"
+  },
+  {
+    "id": "cal-010",
+    "title": "Sales All-Hands",
+    "start": "2026-03-18T13:00:00-06:00",
+    "end": "2026-03-18T14:00:00-06:00",
+    "location": "Main Conference Room + Zoom",
+    "attendees": ["mike.astraos@gmail.com", "lisa.park@vertexsolutions.com"],
+    "description": "Monthly sales all-hands. Q1 wrap-up and Q2 planning.",
+    "color": "#3b82f6"
+  }
+]

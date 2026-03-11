@@ -90,6 +90,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
     _debug_send(sid, payload)
     await websocket.send_text(payload)
 
+    # Proactive: trigger the agent to fetch emails/calendar and show dashboard
+    await _handle_user_message(
+        websocket,
+        "[SYSTEM] New session started. Proactively check my emails and calendar, "
+        "then render a dashboard widget showing my inbox summary, today's schedule, "
+        "and any action items I should know about.",
+        sid,
+    )
+
     try:
         while True:
             raw = await websocket.receive_text()
