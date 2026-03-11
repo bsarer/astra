@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -47,12 +48,100 @@ def _debug_recv(session_id: str, data: str):
 # App-level readiness flag for health check (Req 7.3)
 _ready = False
 
+# Track active WebSocket connections for email polling push
+_active_connections: dict[str, WebSocket] = {}  # session_id -> websocket
+_seen_email_ids: set[str] = set()  # track already-processed email IDs
+
+# Per-session lock to prevent poller and user messages from interleaving
+_session_locks: dict[str, asyncio.Lock] = {}
+
+EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "30"))  # seconds
+
+
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    if session_id not in _session_locks:
+        _session_locks[session_id] = asyncio.Lock()
+    return _session_locks[session_id]
+
+
+async def _email_poller():
+    """Background task: polls for new emails and triggers agent for stock-related ones."""
+    from providers.factory import get_email_provider
+
+    logger.info("Email poller started (interval=%ds)", EMAIL_POLL_INTERVAL)
+
+    # Wait for first connection and initial agent fetch to complete
+    while not _active_connections:
+        await asyncio.sleep(2)
+
+    # Wait extra time for the initial proactive fetch to finish
+    await asyncio.sleep(20)
+
+    # Seed seen IDs from current inbox (so we don't re-trigger on existing emails)
+    try:
+        provider = get_email_provider()
+        initial = await provider.list_emails(limit=20)
+        for e in initial:
+            _seen_email_ids.add(e.id)
+        logger.info("Email poller seeded with %d existing email IDs", len(_seen_email_ids))
+    except Exception as ex:
+        logger.warning("Email poller seed failed: %s", ex)
+
+    while True:
+        await asyncio.sleep(EMAIL_POLL_INTERVAL)
+
+        if not _active_connections:
+            continue
+
+        try:
+            provider = get_email_provider()
+            emails = await provider.list_emails(limit=10)
+
+            new_emails = [e for e in emails if e.id not in _seen_email_ids]
+            if not new_emails:
+                continue
+
+            for e in new_emails:
+                _seen_email_ids.add(e.id)
+
+            logger.info("Email poller found %d new email(s)", len(new_emails))
+
+            # Process each new email without blocking user messages
+            for e in new_emails:
+                prompt = (
+                    f"[SYSTEM] New email detected by background poller:\n\n"
+                    f"From: {e.from_addr}\n"
+                    f"Subject: {e.subject}\n"
+                    f"Body: {e.body[:500]}\n\n"
+                    f"INSTRUCTIONS: Check if this email mentions any stocks from Mike's "
+                    f"watchlist (AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META). "
+                    f"If it does, call `analyze_stock_email_context` with the subject and body, "
+                    f"then call `get_stock_quote` for each matched ticker, "
+                    f"then render a stock alert widget with id 'stock-alert'. "
+                    f"If the email is NOT stock-related, just show a brief notification "
+                    f"like 'New email from [sender]: [subject]'."
+                )
+
+                for sid, ws in list(_active_connections.items()):
+                    lock = _get_session_lock(sid)
+                    # Use lock so poller waits if user is mid-message
+                    try:
+                        async with lock:
+                            await _handle_user_message(ws, prompt, sid)
+                    except Exception as ex:
+                        logger.warning("Poller push failed for session %s: %s", sid, ex)
+
+        except Exception as ex:
+            logger.warning("Email poller error: %s", ex)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ready
     _ready = True
+    poller_task = asyncio.create_task(_email_poller())
     yield
+    poller_task.cancel()
 
 
 app = FastAPI(title="LangChain GenUI Web Agent PoC", lifespan=lifespan)
@@ -93,11 +182,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
     # Proactive: trigger the agent to fetch emails/calendar and show dashboard
     await _handle_user_message(
         websocket,
-        "[SYSTEM] New session started. Proactively check my emails and calendar, "
-        "then render a dashboard widget showing my inbox summary, today's schedule, "
-        "and any action items I should know about.",
+        "[SYSTEM] New session started. Proactively:\n"
+        "1. Use `list_emails` to check the inbox\n"
+        "2. Use `list_calendar_events` to check today's schedule\n"
+        "3. Use `get_upcoming_trip` to check for upcoming travel\n"
+        "4. CRITICAL: For EVERY email returned, check if the subject or preview mentions "
+        "any stocks from Mike's watchlist (AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META). "
+        "If ANY email mentions these stocks, you MUST call `analyze_stock_email_context` "
+        "with that email's subject and body, then call `get_stock_quote` for each matched "
+        "ticker, then render a stock alert widget.\n"
+        "5. Render a dashboard widget with inbox summary, schedule, and any alerts.",
         sid,
     )
+
+    # Register for email polling push
+    _active_connections[sid] = websocket
 
     try:
         while True:
@@ -113,15 +212,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
                 continue
 
             if msg["type"] == "user_message":
-                await _handle_user_message(websocket, msg["content"], sid)
+                lock = _get_session_lock(sid)
+                async with lock:
+                    await _handle_user_message(websocket, msg["content"], sid)
 
             elif msg["type"] == "widget_event":
-                await _handle_widget_event(
-                    websocket, msg["event_name"], msg["payload"], sid
-                )
+                lock = _get_session_lock(sid)
+                async with lock:
+                    await _handle_widget_event(
+                        websocket, msg["event_name"], msg["payload"], sid
+                    )
 
     except WebSocketDisconnect:
-        pass
+        _active_connections.pop(sid, None)
+        _session_locks.pop(sid, None)
 
 
 async def _handle_user_message(

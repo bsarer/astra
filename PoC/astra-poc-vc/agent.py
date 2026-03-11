@@ -33,8 +33,13 @@ class GraphState(TypedDict):
     # Simple dictionary to hold the last requested UI injection
     ui_event: dict | None
 
-# Load prompts from files (system + design system + persona are merged)
-SYSTEM_PROMPT = load_prompt("system") + "\n\n" + load_prompt("design_system") + "\n\n" + load_prompt("persona_context")
+# Load prompts from files (system + design system + persona + widget templates are merged)
+SYSTEM_PROMPT = (
+    load_prompt("system") + "\n\n" +
+    load_prompt("design_system") + "\n\n" +
+    load_prompt("widget_templates") + "\n\n" +
+    load_prompt("persona_context")
+)
 
 @tool
 def install_python_packages(package_names: List[str]) -> str:
@@ -94,9 +99,10 @@ def run_python_code(code: str) -> str:
 
 from tools_email_calendar import email_calendar_tools
 from tools_travel import travel_tools
+from tools_stock import stock_tools
 
 # Available tools
-tools = [run_python_code, install_python_packages, render_widget] + email_calendar_tools + travel_tools
+tools = [run_python_code, install_python_packages, render_widget] + email_calendar_tools + travel_tools + stock_tools
 
 # Initialize LLM
 llm_model = os.getenv("OPENAI_MODEL", os.getenv("MODEL", "gpt-4o-mini"))
