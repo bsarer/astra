@@ -9,6 +9,7 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.tools import tool
+from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 # Load API keys from .env
@@ -22,22 +23,40 @@ def load_prompt(name: str) -> str:
     with open(os.path.join(PROMPTS_DIR, f"{name}.md"), "r", encoding="utf-8") as f:
         return f.read().strip()
 
+# --- Canvas state tracking (persisted via checkpointer) ---
+# Maps surface_id -> summary of what's rendered (type, key data)
+_canvas_state: dict[str, dict] = {}
+# Set of email IDs already processed for stock alerts
+_processed_email_ids: set[str] = set()
+
+
+def get_canvas_context() -> str:
+    """Build a context string describing what's currently on the canvas."""
+    if not _canvas_state:
+        return "Canvas is empty — no widgets rendered yet."
+    lines = ["Current canvas surfaces:"]
+    for sid, info in _canvas_state.items():
+        lines.append(f"  - {sid}: {info.get('summary', 'unknown')}")
+    return "\n".join(lines)
+
+
+def get_processed_emails_context() -> str:
+    """Build a context string for already-processed email IDs."""
+    if not _processed_email_ids:
+        return ""
+    return f"Already processed email IDs (do NOT re-alert): {', '.join(sorted(_processed_email_ids))}"
+
+
 # Define the State schema for LangGraph
 class GraphState(TypedDict):
-    # 'messages' will hold the conversation history
-    # We use add_messages reducer to append new messages automatically
     messages: Annotated[list[BaseMessage], add_messages]
-    
-    # 'ui_components' will hold the ephemeral GenUI components the agent wants to display
-    # This is heavily scoped as a dict replacing old ones for now, or just an event dispatch
-    # Simple dictionary to hold the last requested UI injection
     ui_event: dict | None
 
-# Load prompts from files (system + design system + persona + widget templates are merged)
+# Load prompts from files (system + A2UI catalog + design system + persona)
 SYSTEM_PROMPT = (
     load_prompt("system") + "\n\n" +
+    load_prompt("a2ui_catalog") + "\n\n" +
     load_prompt("design_system") + "\n\n" +
-    load_prompt("widget_templates") + "\n\n" +
     load_prompt("persona_context")
 )
 
@@ -97,12 +116,34 @@ def run_python_code(code: str) -> str:
         return f"Error executing code: {e}"
 
 
+@tool
+def emit_ui(surface_id: str, components: list[dict], grid: dict | None = None) -> str:
+    """Emit a declarative UI surface using A2UI components.
+
+    Args:
+        surface_id: Unique identifier for this surface (e.g., "stock-alert", "mike-dashboard").
+        components: Flat list of A2UI components in adjacency list format.
+            Each component: {"id": str, "type": str, "props": dict, "children": list[str]}
+            The first component is the root unless specified otherwise.
+        grid: Optional layout hints {"w": int (1-12 columns), "h": int (row units)}.
+
+    Returns:
+        Confirmation string.
+    """
+    # Track what's on the canvas
+    comp_types = [c.get("type", "?") for c in components[:5]]
+    summary = f"{len(components)} components ({', '.join(comp_types)})"
+    _canvas_state[surface_id] = {"summary": summary, "component_count": len(components)}
+    return f"Surface '{surface_id}' emitted with {len(components)} components. Canvas now has {len(_canvas_state)} surface(s)."
+
+
 from tools_email_calendar import email_calendar_tools
 from tools_travel import travel_tools
 from tools_stock import stock_tools
 
 # Available tools
-tools = [run_python_code, install_python_packages, render_widget] + email_calendar_tools + travel_tools + stock_tools
+tools = [run_python_code, install_python_packages, render_widget, emit_ui] + email_calendar_tools + travel_tools + stock_tools
+_builtin_tool_node = ToolNode(tools)
 
 # Initialize LLM
 llm_model = os.getenv("OPENAI_MODEL", os.getenv("MODEL", "gpt-4o-mini"))
@@ -129,35 +170,26 @@ async def chatbot_node(state: GraphState):
     """The main reasoning node for the agent."""
     messages = state["messages"]
     
-    # Prepend system prompt if not present
-    if not any(isinstance(m, SystemMessage) for m in messages):
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    # Build dynamic system prompt with canvas state awareness
+    canvas_ctx = get_canvas_context()
+    email_ctx = get_processed_emails_context()
+    dynamic_context = f"\n\n### Current Canvas State:\n{canvas_ctx}"
+    if email_ctx:
+        dynamic_context += f"\n\n### Processed Emails:\n{email_ctx}"
+    
+    full_system = SYSTEM_PROMPT + dynamic_context
+    
+    # Prepend system prompt if not present, or replace existing one
+    filtered = [m for m in messages if not isinstance(m, SystemMessage)]
+    messages = [SystemMessage(content=full_system)] + filtered
         
     response = await llm_with_tools.ainvoke(messages)
     
     return {"messages": [response], "ui_event": None}
 
 async def tool_node(state: GraphState):
-    """Executes the specified tools."""
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        tool_map = {t.name: t for t in tools}
-        tool_responses = []
-        
-        for tool_call in last_message.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            if tool_name in tool_map:
-                try:
-                    res = await tool_map[tool_name].ainvoke(tool_args)
-                    tool_responses.append(ToolMessage(content=str(res), tool_call_id=tool_call["id"]))
-                except Exception as e:
-                    tool_responses.append(ToolMessage(content=str(e), tool_call_id=tool_call["id"]))
-                    
-        return {"messages": tool_responses}
-    return {"messages": []}
+    """Executes the specified tools using LangGraph's built-in ToolNode."""
+    return await _builtin_tool_node.ainvoke(state)
 
 def should_continue(state: GraphState) -> Literal["tools", "__end__"]:
     """Determines whether to jump to the tool node or finish."""

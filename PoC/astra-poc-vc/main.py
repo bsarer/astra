@@ -11,8 +11,11 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
-from agent import get_agent_response_stream
+from agent import get_agent_response_stream, graph
 from session import SessionManager
+from copilotkit import LangGraphAGUIAgent
+from ag_ui.core.types import RunAgentInput
+from ag_ui.encoder import EventEncoder
 from models import (
     serialize_server_message,
     parse_client_message,
@@ -146,8 +149,105 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LangChain GenUI Web Agent PoC", lifespan=lifespan)
 
+# CORS middleware for CopilotKit frontend
+from starlette.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Shared session manager
 session_manager = SessionManager()
+
+# --- CopilotKit / AG-UI Endpoint ---
+_agui_agent = LangGraphAGUIAgent(
+    name="astra_agent",
+    description="Astra AI assistant with email, calendar, stock, and travel tools.",
+    graph=graph,
+)
+
+_copilotkit_info = {
+    "agents": {
+        "astra_agent": {"description": _agui_agent.description or ""},
+    },
+    "actions": {},
+    "version": "0.1.78",
+}
+
+
+@app.api_route("/api/copilotkit", methods=["GET", "POST"])
+async def copilotkit_single_endpoint(request: Request):
+    """Single-endpoint CopilotKit handler (info + agent execution)."""
+    if request.method == "GET":
+        return JSONResponse(_copilotkit_info)
+
+    body = await request.json()
+    method = body.get("method", "")
+    logger.info("CopilotKit POST method=%s keys=%s", method, list(body.keys()))
+
+    # Info / discovery
+    if method == "info" or not method:
+        return JSONResponse(_copilotkit_info)
+
+    # Agent connect (execution) — method: "agent/connect"
+    if method.startswith("agent/"):
+        params = body.get("params", {})
+        accept_header = request.headers.get("accept", "")
+        encoder = EventEncoder(accept=accept_header)
+
+        import uuid as _uuid
+        agent_input = RunAgentInput(
+            thread_id=params.get("threadId", params.get("thread_id", str(_uuid.uuid4()))),
+            run_id=params.get("runId", params.get("run_id", str(_uuid.uuid4()))),
+            state=params.get("state", {}),
+            messages=params.get("messages", []),
+            tools=params.get("tools", []),
+            context=params.get("context", []),
+            forwarded_props=params.get("forwardedProps", params.get("forwarded_props", {})),
+        )
+
+        async def event_generator():
+            async for event in _agui_agent.run(agent_input):
+                yield encoder.encode(event)
+
+        return StreamingResponse(event_generator(), media_type=encoder.get_content_type())
+
+    return JSONResponse({"error": f"Unknown method: {method}"}, status_code=400)
+
+
+@app.get("/api/copilotkit/info")
+async def copilotkit_info_get():
+    return JSONResponse(_copilotkit_info)
+
+
+@app.post("/api/copilotkit/{path:path}")
+async def copilotkit_rest_agent(request: Request, path: str):
+    """REST transport fallback: /api/copilotkit/agent/<name>/run"""
+    if path.startswith("agent/"):
+        body = await request.json()
+        accept_header = request.headers.get("accept", "")
+        encoder = EventEncoder(accept=accept_header)
+
+        import uuid as _uuid
+        agent_input = RunAgentInput(
+            thread_id=body.get("threadId", body.get("thread_id", str(_uuid.uuid4()))),
+            run_id=body.get("runId", body.get("run_id", str(_uuid.uuid4()))),
+            state=body.get("state", {}),
+            messages=body.get("messages", []),
+            tools=body.get("tools", []),
+            context=body.get("context", []),
+            forwarded_props=body.get("forwardedProps", body.get("forwarded_props", {})),
+        )
+
+        async def event_generator():
+            async for event in _agui_agent.run(agent_input):
+                yield encoder.encode(event)
+
+        return StreamingResponse(event_generator(), media_type=encoder.get_content_type())
+
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 
 # --- Health Check (Req 7.1, 7.2, 7.3) ---

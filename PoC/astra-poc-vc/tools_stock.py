@@ -119,10 +119,19 @@ def get_stock_history(ticker: str, period: str = "1mo") -> str:
 
 
 @tool
-def analyze_stock_email_context(email_subject: str, email_body: str) -> str:
+def analyze_stock_email_context(email_subject: str, email_body: str, email_id: str = "") -> str:
     """Analyze an email for stock market signals relevant to Mike's watchlist.
     Extracts mentioned tickers, sentiment, and fetches real-time data for matches.
-    Use this when an email mentions stocks, market movements, or financial news."""
+    Use this when an email mentions stocks, market movements, or financial news.
+    Pass email_id to avoid re-processing the same email."""
+    # Import canvas tracking from agent module
+    from agent import _processed_email_ids
+
+    # Skip if already processed
+    if email_id and email_id in _processed_email_ids:
+        return json.dumps({"relevant": False, "already_processed": True,
+                           "message": f"Email {email_id} was already analyzed — skipping."})
+
     import yfinance as yf
     import re
 
@@ -187,6 +196,10 @@ def analyze_stock_email_context(email_subject: str, email_body: str) -> str:
         except:
             pass
 
+    # Mark email as processed
+    if email_id:
+        _processed_email_ids.add(email_id)
+
     return json.dumps({
         "relevant": True,
         "sentiment": sentiment,
@@ -194,6 +207,7 @@ def analyze_stock_email_context(email_subject: str, email_body: str) -> str:
         "bear_signals": bear_count,
         "matched_tickers": list(found_tickers),
         "stock_data": stock_data,
+        "email_id": email_id,
         "action": f"Stock alert: {sentiment} signal detected for {', '.join(found_tickers)} from email",
     }, indent=2)
 

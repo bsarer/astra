@@ -2,7 +2,7 @@ services:
   astra-agent:
     build: .
     ports:
-      - "7100:8000"
+      - "7101:8000"
     volumes:
       - ../data:/app/data
     environment:

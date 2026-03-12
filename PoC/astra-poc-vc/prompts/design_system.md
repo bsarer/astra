@@ -1,17 +1,43 @@
-### CRITICAL AIOS UI/UX Design System (MANDATORY):
-You MUST strictly follow this design system to ensure all injected widgets look like native components of the AIOS workspace. Do not use random colors or basic HTML forms.
-1. **Base Glassmorphic Panels**: The grid container is inherently transparent. If your widget needs a background (like a card, form, or dashboard), use this glassmorphic style: `background: rgba(26, 29, 36, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);`
-2. **Typography**: Always use `font-family: 'Inter', system-ui, sans-serif;`.
-   - **Primary Text** (Titles, main labels): `color: #f8fafc; font-weight: 500;`
-   - **Secondary Text** (Descriptions, meta data): `color: #94a3b8; font-weight: 400;`
-3. **Brand Colors (Buttons, Accents, Links)**: 
-   - Primary Accent: Use `#3b82f6` (Blue).
-   - Glow Effect (for active elements/hover): `box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);`
-4. **Interactive Elements (Buttons, Inputs)**:
-   - **Buttons**: `background-color: #3b82f6; color: white; border: none; border-radius: 8px; padding: 10px 16px; font-weight: 500; cursor: pointer; transition: all 0.2s;`
-   - **Button Hover**: Change background to `#2563eb` and add a slight scale `transform: translateY(-1px);`
-   - **Inputs/Textareas**: `background: rgba(15, 17, 21, 0.6); border: 1px solid rgba(255, 255, 255, 0.1); color: #f8fafc; border-radius: 8px; padding: 10px; outline: none; transition: border-color 0.2s;`
-   - **Input Focus**: Change border to `#3b82f6`.
-5. **Spacing & Layout**: Maintain plenty of breathing space. Use CSS Flexbox or Grid extensively. Use `padding: 20px; gap: 12px;` for inner main containers.
-6. **Fluid Sizing**: Your widget HTML MUST fill its container responsively. Wrap your ENTIRE content in a single root `<div style="width: 100%; height: 100%; display: flex; flex-direction: column;">`. All child elements should use percentage-based or flex sizing. NEVER use fixed pixel heights on the root container. The iframe body is already set to `display:flex; align-items:center; justify-content:center;` so your root div will be centered automatically.
-7. **Responsive Sizing**: Provide `width_percent` (from 1 to 100, where 100 is full screen) and `height_px` (exact pixels) dynamically based on the widget's intended content size. A generic form or calculator usually needs `width_percent=30, height_px=450`.
+### AstraOS Design System (MANDATORY)
+
+All UI surfaces rendered via `emit_ui` appear as **floating windows** on the AstraOS desktop canvas. Each window has a title bar (derived from the `surface_id`), minimize/close controls, and is freely draggable and resizable by the user.
+
+#### 1. Window Behavior
+- Every `emit_ui` call creates (or updates) a floating window identified by `surface_id`.
+- The `surface_id` becomes the window title (e.g., "stock-alert" → "Stock Alert").
+- Use clear, descriptive `surface_id` values — they are user-visible.
+- Windows cascade automatically; the user can drag and resize them freely.
+- Re-emitting the same `surface_id` updates the window content without creating a duplicate.
+
+#### 2. Grid Hints
+- `grid.w` (1–12): maps to window width. 4 = ~320px, 6 = ~480px, 8 = ~640px, 12 = ~900px.
+- `grid.h` (1–8): maps to window height. 2 = ~160px, 3 = ~240px, 4 = ~320px.
+- These are initial sizes — the user can resize after.
+
+#### 3. Visual Style (Glassmorphic Dark)
+- Background: `rgba(20, 27, 45, 0.92)` with `backdrop-filter: blur(16px)`
+- Border: `1px solid rgba(148, 163, 184, 0.12)`
+- Border radius: `12px`
+- Font: `Inter, system-ui, -apple-system, sans-serif`
+- Primary text: `#f8fafc` | Secondary: `#94a3b8` | Muted: `#64748b`
+- Accent blue: `#3b82f6` | Cyan: `#06b6d4` | Green: `#22c55e` | Red: `#ef4444` | Amber: `#f59e0b`
+
+#### 4. Component Guidelines
+- Use A2UI components from the catalog — never raw HTML.
+- Keep content compact; the user controls window size.
+- Use `Column` as root for vertical layouts, `Row` for horizontal.
+- Prefer `Card` with `variant: "flat"` inside windows (the window itself is already glass).
+- Use `Text` with `variant: "title"` for section headers inside the window body.
+
+#### 5. Window Sizing Recommendations
+| Content Type | Suggested grid |
+|---|---|
+| Clock, single metric | `w: 3, h: 2` |
+| Stock ticker list, email list | `w: 5, h: 4` |
+| Dashboard with multiple sections | `w: 8, h: 5` |
+| Full-width alert or summary | `w: 6, h: 3` |
+
+#### 6. Chat Panel
+- The chat panel is a fixed sidebar on the right (380px wide).
+- It uses CopilotKit's chat UI, rebranded as "Astra".
+- Chat should be brief — widgets carry the detail.
