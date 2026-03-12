@@ -58,7 +58,7 @@ _seen_email_ids: set[str] = set()  # track already-processed email IDs
 # Per-session lock to prevent poller and user messages from interleaving
 _session_locks: dict[str, asyncio.Lock] = {}
 
-EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "30"))  # seconds
+EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "300"))  # seconds (default 5 min)
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -73,12 +73,12 @@ async def _email_poller():
 
     logger.info("Email poller started (interval=%ds)", EMAIL_POLL_INTERVAL)
 
-    # Wait for first connection and initial agent fetch to complete
+    # Wait for first connection
     while not _active_connections:
         await asyncio.sleep(2)
 
-    # Wait extra time for the initial proactive fetch to finish
-    await asyncio.sleep(20)
+    # Give the background fetch time to seed seen IDs before we start polling
+    await asyncio.sleep(10)
 
     # Seed seen IDs from current inbox (so we don't re-trigger on existing emails)
     try:
@@ -141,6 +141,13 @@ async def _email_poller():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ready
+    # Index user files into memory on startup (non-blocking, best-effort)
+    try:
+        from tools_files import index_all_files
+        indexed = index_all_files()
+        logger.info("Startup: indexed %d user files", indexed)
+    except Exception as e:
+        logger.warning("File indexing failed (non-critical): %s", e)
     _ready = True
     poller_task = asyncio.create_task(_email_poller())
     yield
@@ -279,24 +286,41 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
     _debug_send(sid, payload)
     await websocket.send_text(payload)
 
-    # Proactive: trigger the agent to fetch emails/calendar and show dashboard
+    # Register for email polling push BEFORE background task so poller can find us
+    _active_connections[sid] = websocket
+
+    # Lightweight greeting — non-blocking, lets user type immediately
     await _handle_user_message(
         websocket,
-        "[SYSTEM] New session started. Proactively:\n"
-        "1. Use `list_emails` to check the inbox\n"
-        "2. Use `list_calendar_events` to check today's schedule\n"
-        "3. Use `get_upcoming_trip` to check for upcoming travel\n"
-        "4. CRITICAL: For EVERY email returned, check if the subject or preview mentions "
-        "any stocks from Mike's watchlist (AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META). "
-        "If ANY email mentions these stocks, you MUST call `analyze_stock_email_context` "
-        "with that email's subject and body, then call `get_stock_quote` for each matched "
-        "ticker, then render a stock alert widget.\n"
-        "5. Render a dashboard widget with inbox summary, schedule, and any alerts.",
+        "[SYSTEM] Session started. Greet Mike briefly (one sentence) and tell him "
+        "you're loading his dashboard in the background. Do NOT call any tools yet.",
         sid,
     )
 
-    # Register for email polling push
-    _active_connections[sid] = websocket
+    # Fire the heavy fetch as a background task so the UI is immediately usable
+    async def _background_fetch():
+        await asyncio.sleep(0.5)  # small yield so WS loop starts
+        if sid not in _active_connections:
+            return
+        ws = _active_connections.get(sid)
+        if not ws:
+            return
+        lock = _get_session_lock(sid)
+        async with lock:
+            await _handle_user_message(
+                ws,
+                "[SYSTEM] Background fetch: now load Mike's dashboard.\n"
+                "1. Call `list_emails` — show inbox summary widget (surface_id='inbox-summary')\n"
+                "2. Call `list_calendar_events` — show today's schedule widget (surface_id='schedule')\n"
+                "3. Call `get_upcoming_trip` — if a trip is found, show a travel widget\n"
+                "4. For each email, check if subject/body mentions AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META. "
+                "If any match, call `analyze_stock_email_context` then `get_stock_quote` and render "
+                "a stock alert widget (surface_id='stock-alert').\n"
+                "Keep chat text to one short summary line. Widgets carry the detail.",
+                sid,
+            )
+
+    asyncio.create_task(_background_fetch())
 
     try:
         while True:

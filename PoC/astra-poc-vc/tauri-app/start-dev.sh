@@ -2,6 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMPOSE_DIR="$SCRIPT_DIR/.."
 REACT_PID=""
 
 cleanup() {
@@ -9,25 +10,20 @@ cleanup() {
     if [ -n "$REACT_PID" ]; then
         kill "$REACT_PID" 2>/dev/null || true
     fi
-    docker stop astra-agent 2>/dev/null || true
+    docker compose -f "$COMPOSE_DIR/docker-compose.yml" down 2>/dev/null || true
 }
 trap cleanup EXIT
 
-echo "[Astra] Starting Docker container (backend on port 7101)..."
+# Verify Qdrant is reachable (expected: agentic-qdrant on port 6333)
+echo "[Astra] Checking Qdrant on port 6333..."
+if curl -s http://localhost:6333/healthz > /dev/null 2>&1; then
+    echo "[Astra] Qdrant is up."
+else
+    echo "[Astra] WARNING: Qdrant not reachable on port 6333 — memory will use in-process fallback."
+fi
 
-# Stop and remove existing container
-docker stop astra-agent 2>/dev/null || true
-docker rm astra-agent 2>/dev/null || true
-
-# Start container — backend on 7101, React dev server will be on 7100
-docker run -d \
-    --name astra-agent \
-    --security-opt no-new-privileges \
-    --cap-drop=ALL \
-    -p 7101:8000 \
-    -v "$SCRIPT_DIR/../../data:/app/data:ro" \
-    --env-file "$SCRIPT_DIR/../.env" \
-    astra-agent
+echo "[Astra] Starting backend via docker-compose..."
+docker compose -f "$COMPOSE_DIR/docker-compose.yml" --env-file "$COMPOSE_DIR/.env" up -d --build
 
 echo "[Astra] Waiting for backend health check..."
 for i in {1..30}; do

@@ -7,3 +7,5 @@ langgraph
 langchain-core
 yfinance
 copilotkit
+qdrant-client
+openai
