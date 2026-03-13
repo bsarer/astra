@@ -15,6 +15,10 @@ services:
       - DATA_PROVIDER=${DATA_PROVIDER}
       - QDRANT_URL=http://host.docker.internal:6333
       - PERSONA_FILES_DIR=/app/data/personas/mike/files
+      - LANGFUSE_ENABLED=${LANGFUSE_ENABLED:-0}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=http://host.docker.internal:3000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

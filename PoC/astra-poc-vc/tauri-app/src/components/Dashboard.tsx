@@ -1,6 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import { useRenderToolCall } from "@copilotkit/react-core";
+import { useCoAgent, useCopilotChat } from "@copilotkit/react-core";
 import { A2UIRenderer } from "./A2UIRenderer";
+
+interface AgentState {
+  ui_event: {
+    surface_id: string;
+    components: any[];
+    grid?: { w?: number; h?: number };
+  } | null;
+  needs_ui: boolean;
+}
 
 interface WindowState {
   surfaceId: string;
@@ -39,15 +48,32 @@ function surfaceTitle(id: string): string {
   return id.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Map widget button actions to chat messages sent to the agent
+const ACTION_MESSAGES: Record<string, string> = {
+  show_inbox: "show me my inbox",
+  show_calendar: "show me my calendar",
+  show_stocks: "show me my stocks",
+  show_files: "show me my files",
+  read_file: "read file",
+};
+
 export function Dashboard() {
   const [windows, setWindows] = useState<WindowState[]>([]);
   const dragRef = useRef<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
   const resizeRef = useRef<{ id: string; startX: number; startY: number; origW: number; origH: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
+  const { appendMessage } = useCopilotChat();
+
   const handleAction = useCallback((action: string, payload?: Record<string, any>) => {
     console.log("[Dashboard] Action:", action, payload);
-  }, []);
+    let msg = ACTION_MESSAGES[action];
+    if (!msg) return;
+    if (action === "read_file" && payload?.filename) {
+      msg = `read file ${payload.filename}`;
+    }
+    appendMessage({ id: crypto.randomUUID(), role: "user", content: msg } as any);
+  }, [appendMessage]);
 
   const bringToFront = useCallback((id: string) => {
     nextZ += 1;
@@ -77,29 +103,23 @@ export function Dashboard() {
     });
   }, []);
 
-  // Intercept emit_ui tool calls from the agent
-  useRenderToolCall({
-    name: "emit_ui",
-    render: ({ status, args }) => {
-      console.log("[Dashboard] emit_ui:", status, JSON.stringify(args));
-      const { surface_id, components, grid } = args as {
-        surface_id: string;
-        components: any[];
-        grid?: { w?: number; h?: number };
-      };
-      if (status === "complete" && surface_id && components?.length) {
-        upsertWindow(surface_id, components, grid);
-      }
-      if (status !== "complete") {
-        return (
-          <div className="aios-widget-loading">
-            <span className="aios-text--muted">Rendering {surface_id}…</span>
-          </div>
-        );
-      }
-      return <></>;
-    },
+  const { state: agentState } = useCoAgent<AgentState>({
+    name: "astra_agent",
+    initialState: { ui_event: null, needs_ui: false },
   });
+
+  // Watch ui_event from agent state — whenever it changes, upsert the window
+  const lastSurfaceRef = useRef<string | null>(null);
+  useEffect(() => {
+    const ev = agentState?.ui_event;
+    if (!ev?.surface_id || !ev?.components?.length) return;
+    // Deduplicate: only act if this is a new surface_id or updated content
+    const key = `${ev.surface_id}:${ev.components.length}`;
+    if (lastSurfaceRef.current === key) return;
+    lastSurfaceRef.current = key;
+    console.log("[Dashboard] useCoAgent ui_event:", ev.surface_id, ev.components.length);
+    upsertWindow(ev.surface_id, ev.components, ev.grid ?? undefined);
+  }, [agentState?.ui_event, upsertWindow]);
 
   // --- Mouse drag (title bar) ---
   const onTitleMouseDown = useCallback((e: React.MouseEvent, id: string) => {

@@ -33,6 +33,8 @@ load_dotenv()
 # Debug mode: set DEBUG=1 in .env to log all WS messages
 DEBUG = os.getenv("DEBUG", "0") == "1"
 logger = logging.getLogger("astra")
+# Always show INFO level so we can see CopilotKit request details
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 if DEBUG:
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.setLevel(logging.DEBUG)
@@ -192,28 +194,30 @@ async def copilotkit_single_endpoint(request: Request):
 
     body = await request.json()
     method = body.get("method", "")
-    logger.info("CopilotKit POST method=%s keys=%s", method, list(body.keys()))
+    logger.info("CopilotKit POST method=%s", method)
 
     # Info / discovery
     if method == "info" or not method:
         return JSONResponse(_copilotkit_info)
 
-    # Agent connect (execution) — method: "agent/connect"
+    # Agent connect/run — payload is in body["body"], not body["params"]
     if method.startswith("agent/"):
-        params = body.get("params", {})
+        # CopilotKit sends: {"method": "agent/run", "params": {"agentId": "..."}, "body": {actual payload}}
+        payload = body.get("body") or body.get("params", {})
         accept_header = request.headers.get("accept", "")
         encoder = EventEncoder(accept=accept_header)
 
         import uuid as _uuid
         agent_input = RunAgentInput(
-            thread_id=params.get("threadId", params.get("thread_id", str(_uuid.uuid4()))),
-            run_id=params.get("runId", params.get("run_id", str(_uuid.uuid4()))),
-            state=params.get("state", {}),
-            messages=params.get("messages", []),
-            tools=params.get("tools", []),
-            context=params.get("context", []),
-            forwarded_props=params.get("forwardedProps", params.get("forwarded_props", {})),
+            thread_id=payload.get("threadId", payload.get("thread_id", str(_uuid.uuid4()))),
+            run_id=payload.get("runId", payload.get("run_id", str(_uuid.uuid4()))),
+            state=payload.get("state", {}),
+            messages=payload.get("messages", []),
+            tools=payload.get("tools", []),
+            context=payload.get("context", []),
+            forwarded_props=payload.get("forwardedProps", payload.get("forwarded_props", {})),
         )
+        logger.info("CopilotKit agent run: thread=%s msgs=%d", agent_input.thread_id, len(agent_input.messages))
 
         async def event_generator():
             async for event in _agui_agent.run(agent_input):
