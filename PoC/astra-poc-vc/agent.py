@@ -4,40 +4,31 @@ import logging
 from typing import Literal, List
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from langchain_openai import ChatOpenAI
-
-# Optional Langfuse tracing — set LANGFUSE_ENABLED=1 in .env to activate
-_langfuse_handler = None
-if os.getenv("LANGFUSE_ENABLED", "0") == "1":
-    try:
-        from langfuse.decorators import observe as _lf_observe, langfuse_context as _lf_ctx
-        from langfuse import Langfuse
-        _lf = Langfuse()  # picks up LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST from env
-        _langfuse_enabled = True
-        logging.getLogger("astra.agent").info("Langfuse tracing enabled (decorator mode)")
-    except Exception as e:
-        _langfuse_enabled = False
-        logging.getLogger("astra.agent").warning("Langfuse init failed: %s", e)
-else:
-    _langfuse_enabled = False
-
-def _lf_trace(name: str):
-    """Decorator factory: wraps a function with Langfuse tracing if enabled."""
-    def decorator(fn):
-        if not _langfuse_enabled:
-            return fn
-        from langfuse.decorators import observe
-        return observe(name=name)(fn)
-    return decorator
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-
-load_dotenv()
 from langchain_core.tools import tool
 
 logger = logging.getLogger("astra.agent")
+
+# ── Langfuse tracing ──────────────────────────────────────────────────────────
+# Set LANGFUSE_ENABLED=1 to log every LLM call: full context, token counts, latency.
+_lf = None
+if os.getenv("LANGFUSE_ENABLED", "0") == "1":
+    try:
+        from langfuse import Langfuse
+        _lf = Langfuse(
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            host=os.getenv("LANGFUSE_HOST", "http://host.docker.internal:3000"),
+        )
+        logger.info("Langfuse tracing enabled")
+    except Exception as e:
+        logger.warning("Langfuse init failed (non-critical): %s", e)
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
@@ -325,20 +316,24 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
     response = await combined_llm.ainvoke(final_messages, config=ck_config)
     logger.debug("chatbot_node tool_calls=%s", [tc.get("name") for tc in getattr(response, "tool_calls", [])])
 
-    # Langfuse: log input/output for this turn
-    if _langfuse_enabled:
+    # Log to Langfuse: full context, token counts, model
+    if _lf:
         try:
-            last_human_text = last_human if isinstance(last_human, str) else str(last_human)
-            tool_calls = [tc.get("name") for tc in getattr(response, "tool_calls", [])]
-            resp_text = response.content if isinstance(response.content, str) else str(response.content)
-            _lf.trace(
-                name="chatbot_turn",
-                input={"message": last_human_text[:500]},
-                output={"response": resp_text[:500], "tool_calls": tool_calls},
-                tags=["astra", "chatbot"],
+            usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {})
+            input_tokens = (usage.get("input_tokens") or usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "input_tokens", 0)
+            output_tokens = (usage.get("output_tokens") or usage.get("completion_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "output_tokens", 0)
+            model_name = getattr(response, "response_metadata", {}).get("model_name", llm_model)
+            trace = _lf.trace(name="astra_turn", tags=["astra"])
+            trace.generation(
+                name="chatbot",
+                model=model_name,
+                input=[{"role": m.type if hasattr(m, "type") else "user", "content": m.content[:2000] if isinstance(m.content, str) else str(m.content)[:2000]} for m in final_messages],
+                output=response.content if isinstance(response.content, str) else str(response.content),
+                usage={"input": input_tokens, "output": output_tokens, "total": input_tokens + output_tokens},
             )
-        except Exception:
-            pass
+            _lf.flush()
+        except Exception as e:
+            logger.debug("Langfuse log failed (non-critical): %s", e)
 
     # Workflow proposal check
     proposal = engine.end_turn()
@@ -431,17 +426,6 @@ async def tool_node(state: GraphState, config: RunnableConfig):
             engine.log_action(name)
 
     result = await _builtin_tool_node.ainvoke(state)
-
-    # Langfuse: log tool calls
-    if _langfuse_enabled and called_tools:
-        try:
-            _lf.trace(
-                name="tool_calls",
-                input={"tools": called_tools},
-                tags=["astra", "tools"],
-            )
-        except Exception:
-            pass
 
     # Did any data tool run? If so, next chatbot turn needs the UI catalog
     ran_data_tool = any(t in DATA_TOOLS for t in called_tools)
