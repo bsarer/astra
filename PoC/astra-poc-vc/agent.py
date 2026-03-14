@@ -323,12 +323,20 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
             input_tokens = (usage.get("input_tokens") or usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "input_tokens", 0)
             output_tokens = (usage.get("output_tokens") or usage.get("completion_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "output_tokens", 0)
             model_name = getattr(response, "response_metadata", {}).get("model_name", llm_model)
+
+            def _msg_to_dict(m):
+                role = m.type if hasattr(m, "type") else "user"
+                # Normalize LangChain message types to OpenAI roles
+                role = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}.get(role, role)
+                content = m.content if isinstance(m.content, str) else json.dumps(m.content)
+                return {"role": role, "content": content}
+
             trace = _lf.trace(name="astra_turn", tags=["astra"])
             trace.generation(
                 name="chatbot",
                 model=model_name,
-                input=[{"role": m.type if hasattr(m, "type") else "user", "content": m.content[:2000] if isinstance(m.content, str) else str(m.content)[:2000]} for m in final_messages],
-                output=response.content if isinstance(response.content, str) else str(response.content),
+                input=[_msg_to_dict(m) for m in final_messages],
+                output=response.content if isinstance(response.content, str) else json.dumps(response.content),
                 usage={"input": input_tokens, "output": output_tokens, "total": input_tokens + output_tokens},
             )
             _lf.flush()
