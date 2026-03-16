@@ -21,6 +21,7 @@ from copilotkit import LangGraphAGUIAgent
 from ag_ui.core.types import RunAgentInput
 from ag_ui.encoder import EventEncoder
 from email_poller import run_email_poller
+from stock_streamer import ensure_started as start_stock_streamer, subscribe as stock_subscribe
 from models import (
     serialize_server_message,
     parse_client_message,
@@ -96,6 +97,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("File indexing failed (non-critical): %s", e)
     _ready = True
+    start_stock_streamer()
     poller_task = asyncio.create_task(
         run_email_poller(
             active_connections=_active_connections,
@@ -198,6 +200,14 @@ async def health_check():
     if not _ready:
         return JSONResponse({"status": "initializing"}, status_code=503)
     return {"status": "ok"}
+
+
+# ── Stock Live SSE ────────────────────────────────────────────────────────────
+
+@app.get("/api/stocks/live")
+async def stocks_live_sse():
+    """SSE stream of live stock watchlist data, refreshed every 60s."""
+    return StreamingResponse(stock_subscribe(), media_type="text/event-stream")
 
 
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────

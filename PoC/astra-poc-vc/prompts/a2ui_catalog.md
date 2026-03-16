@@ -27,6 +27,7 @@ You generate UI by calling the `emit_ui` tool with a `surface_id` and a flat lis
 | Type | Props |
 |------|-------|
 | StockTicker | ticker, company, price, change_pct |
+| StockWatchlist | title (optional — self-refreshing, fetches live data via SSE every 60s, shows "last refreshed") |
 | StockAlert | title, source, sentiment (bullish/bearish/neutral), tickers (list of {ticker, price, change_pct}), actions (list of {label, action}) |
 | EmailRow | email_id, from_name, initial, subject, preview, time, actions |
 | MetricCard | label, value, change, color |
@@ -60,9 +61,24 @@ emit_ui(
 ```
 
 
+#### Example: Stock Watchlist (use when user says "show me my stocks" or action "show_stocks")
+Use `StockWatchlist` — it auto-refreshes every 60s via SSE and shows "last refreshed". No need to call `get_watchlist_summary` first.
+
+```json
+emit_ui(
+  surface_id="stock-watchlist",
+  components=[
+    {"id": "root", "type": "Column", "props": {"gap": "8px"}, "children": ["watchlist"]},
+    {"id": "watchlist", "type": "StockWatchlist", "props": {"title": "📈 Stock Watchlist"}, "children": []}
+  ],
+  grid={"w": 5, "h": 6}
+)
+```
+
 ```json
 emit_ui(
   surface_id="stock-alert",
+```
   components=[
     {"id": "root", "type": "Column", "props": {"gap": "12px"}, "children": ["banner", "tickers"]},
     {"id": "banner", "type": "StockAlert", "props": {"title": "Market Alert", "source": "Bloomberg Newsletter", "sentiment": "bullish", "tickers": [{"ticker": "AAPL", "price": 189.50, "change_pct": 2.3}], "actions": [{"label": "View Details", "action": "view_details"}]}},

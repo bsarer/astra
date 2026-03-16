@@ -3,7 +3,7 @@ import {
   AIOSDivider, AIOSTabs, AIOSImage, AIOSIcon, AIOSList,
   AIOSStockTicker, AIOSStockAlert, AIOSEmailRow,
   AIOSMetricCard, AIOSSparklineChart, AIOSCalendarEvent,
-  AIOSClock,
+  AIOSClock, AIOSStockWatchlist,
   AIOSFallback,
 } from "./aios";
 
@@ -22,6 +22,7 @@ export const componentMap: Record<string, React.ComponentType<any>> = {
   // Custom Astra components
   StockTicker: AIOSStockTicker,
   StockAlert: AIOSStockAlert,
+  StockWatchlist: AIOSStockWatchlist,
   EmailRow: AIOSEmailRow,
   MetricCard: AIOSMetricCard,
   SparklineChart: AIOSSparklineChart,
