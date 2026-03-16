@@ -60,7 +60,7 @@ _seen_email_ids: set[str] = set()  # track already-processed email IDs
 # Per-session lock to prevent poller and user messages from interleaving
 _session_locks: dict[str, asyncio.Lock] = {}
 
-EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "300"))  # seconds (default 5 min)
+EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "120"))  # seconds (default 2 min)
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -70,8 +70,16 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
 
 
 async def _email_poller():
-    """Background task: polls for new emails and triggers agent for stock-related ones."""
+    """Background task: polls for new emails and triggers agent for relevant ones.
+
+    Non-blocking: runs in background, doesn't block user interaction.
+    Workflow-aware: checks enabled workflows before processing.
+    Context-aware: checks user interests/preferences FIRST, then pulls relevant files/memories.
+    """
     from providers.factory import get_email_provider
+    from workflow_engine import get_workflow_engine
+    from domain_router import classify, classify_email
+    from memory import get_memory_manager
 
     logger.info("Email poller started (interval=%ds)", EMAIL_POLL_INTERVAL)
 
@@ -111,21 +119,118 @@ async def _email_poller():
 
             logger.info("Email poller found %d new email(s)", len(new_emails))
 
+            engine = get_workflow_engine()
+            mgr = get_memory_manager()
+
+            # ── INTELLIGENT NOTIFICATION: check user interests/preferences first ──
+            # Retrieve user's stored interests, preferences, and facts
+            user_interests = []
+            interest_domains = set()
+            try:
+                # Get user preferences/facts about what they want to be notified about
+                interest_memories = mgr.retrieve(
+                    "what am I interested in alerts notifications preferences",
+                    memory_type="fact",
+                    limit=5,
+                )
+                for mem in interest_memories:
+                    content = mem.get("content", "").lower()
+                    user_interests.append(content)
+                    # Extract domains from the interest
+                    interest_result = classify(content)
+                    interest_domains.update(interest_result.domains)
+                logger.debug("User interests found: %s, domains: %s", user_interests, interest_domains)
+            except Exception as ex:
+                logger.debug("Failed to retrieve user interests: %s", ex)
+
             # Process each new email without blocking user messages
             for e in new_emails:
-                prompt = (
-                    f"[SYSTEM] New email detected by background poller:\n\n"
-                    f"From: {e.from_addr}\n"
-                    f"Subject: {e.subject}\n"
-                    f"Body: {e.body[:500]}\n\n"
-                    f"INSTRUCTIONS: Check if this email mentions any stocks from Mike's "
-                    f"watchlist (AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META). "
-                    f"If it does, call `analyze_stock_email_context` with the subject and body, "
-                    f"then call `get_stock_quote` for each matched ticker, "
-                    f"then render a stock alert widget with id 'stock-alert'. "
-                    f"If the email is NOT stock-related, just show a brief notification "
-                    f"like 'New email from [sender]: [subject]'."
+                email_text = f"{e.subject} {e.body}"
+
+                # ── Step 1: Classify email into domains ──
+                email_classification = classify_email(e.subject, e.body, e.from_addr)
+                email_domains = set(email_classification.domains)
+
+                # ── Step 2: Check if email matches user's stored interests ──
+                matches_user_interest = bool(email_domains & interest_domains)
+
+                # Also check for explicit keyword matches from user interests
+                if not matches_user_interest and user_interests:
+                    for interest in user_interests:
+                        # Check if any interest keywords appear in the email
+                        interest_keywords = ["stock", "alert", "finance", "market", "trading"]
+                        for kw in interest_keywords:
+                            if kw in interest and kw in email_text.lower():
+                                matches_user_interest = True
+                                break
+                        if matches_user_interest:
+                            break
+
+                # ── Step 3: Fallback to hardcoded check for stock-related emails ──
+                is_stock_email = "finance" in email_domains or any(
+                    kw in email_text.lower()
+                    for kw in ["stock", "market", "nvda", "aapl", "msft", "tsla", "goog", "amzn", "meta", "bloomberg"]
                 )
+                is_bloomberg = "bloomberg" in e.from_addr.lower()
+
+                # Check if bloomberg workflow is enabled — auto-execute if so
+                bloomberg_workflow_enabled = engine.is_enabled("bloomberg_stock_alert")
+
+                # ── Step 4: Decide relevance based on user context ──
+                should_notify = is_stock_email or is_bloomberg or matches_user_interest
+
+                if not should_notify:
+                    logger.debug("Email '%s' not relevant to user interests, skipping notification", e.subject[:40])
+                    continue
+
+                # Build context-aware prompt
+                if is_stock_email or is_bloomberg or ("finance" in interest_domains and matches_user_interest):
+                    # Pull relevant context from memory/files for finance domain
+                    context_hint = ""
+                    try:
+                        memories = mgr.retrieve(email_text[:500], domains=["finance"], limit=2)
+                        files = mgr.search_files(email_text[:300], domains=["finance"], limit=2)
+                        if memories:
+                            context_hint += "\n\nRelevant memories:\n" + "\n".join(
+                                f"- {m.get('content', '')[:100]}" for m in memories
+                            )
+                        if files:
+                            context_hint += "\n\nRelevant files (read if needed):\n" + "\n".join(
+                                f"- {f.get('filename', '')}: {f.get('summary', '')[:80]}" for f in files
+                            )
+                        # Also mention user's interest for context
+                        if user_interests:
+                            context_hint += "\n\nUser interests that matched:\n" + "\n".join(
+                                f"- {interest[:100]}" for interest in user_interests[:2]
+                            )
+                    except Exception:
+                        pass
+
+                    auto_mode = " (AUTO-WORKFLOW: bloomberg_stock_alert is enabled)" if bloomberg_workflow_enabled else ""
+                    interest_note = " (matches user's stored interest)" if matches_user_interest else ""
+                    prompt = (
+                        f"[SYSTEM] New stock-related email detected{auto_mode}{interest_note}:\n\n"
+                        f"From: {e.from_addr}\n"
+                        f"Subject: {e.subject}\n"
+                        f"Body: {e.body[:500]}\n"
+                        f"{context_hint}\n\n"
+                        f"INSTRUCTIONS: This email matches the user's interests. "
+                        f"1. Call `analyze_stock_email_context` with subject, body, and email_id='{e.id}'\n"
+                        f"2. Call `get_stock_quote` for each matched ticker\n"
+                        f"3. If relevant files were found above, call `read_user_file` to get full context\n"
+                        f"4. Render a stock alert widget (surface_id='stock-alert') combining email + file insights\n"
+                        f"Keep the notification concise but actionable."
+                    )
+                else:
+                    # Generic email notification for non-finance matches
+                    prompt = (
+                        f"[SYSTEM] New email detected (matched user interests: {list(email_domains & interest_domains)}):\n\n"
+                        f"From: {e.from_addr}\n"
+                        f"Subject: {e.subject}\n"
+                        f"Body: {e.body[:300]}\n\n"
+                        f"INSTRUCTIONS: Show a notification for this email that matches the user's interests. "
+                        f"Summarize why this might be relevant based on their stored preferences."
+                    )
 
                 for sid, ws in list(_active_connections.items()):
                     lock = _get_session_lock(sid)
@@ -447,7 +552,41 @@ async def _handle_user_message(
 async def _handle_widget_event(
     websocket: WebSocket, event_name: str, payload: dict, session_id: str
 ) -> None:
-    """Forward a widget event to the agent as a HumanMessage with event context."""
+    """Forward a widget event to the agent as a HumanMessage with event context.
+
+    Special handling for workflow actions (workflow_enable, workflow_dismiss)
+    to provide immediate feedback without LLM roundtrip.
+    """
+    # Handle workflow actions directly
+    action = payload.get("action", "")
+    if action.startswith("workflow_enable:"):
+        workflow_id = action.split(":", 1)[1]
+        from workflow_engine import get_workflow_engine
+        engine = get_workflow_engine()
+        engine.enable(workflow_id)
+        workflows = engine.list_workflows()
+        wf = next((w for w in workflows if w["id"] == workflow_id), {})
+        token_msg: TokenMessage = {
+            "type": "token",
+            "content": f"Workflow **{wf.get('name', workflow_id)}** is now enabled. "
+                       f"It will run automatically when {wf.get('trigger', 'triggered')}."
+        }
+        await websocket.send_text(serialize_server_message(token_msg))
+        done_msg: DoneMessage = {"type": "done"}
+        await websocket.send_text(serialize_server_message(done_msg))
+        return
+
+    if action.startswith("workflow_dismiss:"):
+        workflow_id = action.split(":", 1)[1]
+        token_msg: TokenMessage = {
+            "type": "token",
+            "content": f"Got it, I won't ask about this workflow again this session."
+        }
+        await websocket.send_text(serialize_server_message(token_msg))
+        done_msg: DoneMessage = {"type": "done"}
+        await websocket.send_text(serialize_server_message(done_msg))
+        return
+
     human_text = json.dumps({"widget_event": event_name, "payload": payload})
     try:
         async for event in get_agent_response_stream(human_text, conversation_id=session_id):

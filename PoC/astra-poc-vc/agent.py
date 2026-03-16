@@ -18,6 +18,7 @@ logger = logging.getLogger("astra.agent")
 # ── Langfuse tracing ──────────────────────────────────────────────────────────
 # Set LANGFUSE_ENABLED=1 to log every LLM call: full context, token counts, latency.
 _lf = None
+_lf_traces: dict[str, any] = {}  # session_id -> active trace
 if os.getenv("LANGFUSE_ENABLED", "0") == "1":
     try:
         from langfuse import Langfuse
@@ -29,6 +30,42 @@ if os.getenv("LANGFUSE_ENABLED", "0") == "1":
         logger.info("Langfuse tracing enabled")
     except Exception as e:
         logger.warning("Langfuse init failed (non-critical): %s", e)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for English."""
+    if not text:
+        return 0
+    return len(text) // 4
+
+
+def _extract_token_usage(response) -> dict:
+    """Extract token usage from various LangChain response formats."""
+    # Try response_metadata first (OpenAI format)
+    meta = getattr(response, "response_metadata", {}) or {}
+    usage = meta.get("usage") or meta.get("token_usage") or {}
+
+    # Also check usage_metadata (newer LangChain)
+    usage_meta = getattr(response, "usage_metadata", {}) or {}
+
+    input_tokens = (
+        usage.get("prompt_tokens") or
+        usage.get("input_tokens") or
+        usage_meta.get("input_tokens") or
+        0
+    )
+    output_tokens = (
+        usage.get("completion_tokens") or
+        usage.get("output_tokens") or
+        usage_meta.get("output_tokens") or
+        0
+    )
+
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "total": input_tokens + output_tokens,
+    }
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
@@ -255,21 +292,38 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
         system_parts.append(f"\n### Processed Emails:\n{email_ctx}")
 
     # Domain-aware memory injection (non-blocking)
+    # Track context breakdown for observability
+    _ctx_breakdown = {
+        "base_system_chars": len(BASE_SYSTEM),
+        "ui_catalog_chars": len(UI_CATALOG) if needs_ui else 0,
+        "canvas_ctx_chars": len(canvas_ctx),
+        "email_ctx_chars": len(email_ctx) if email_ctx else 0,
+        "memory_ctx_chars": 0,
+        "memories_retrieved": 0,
+        "files_retrieved": 0,
+        "domains": [],
+    }
     try:
         if last_human and not (isinstance(last_human, str) and last_human.startswith("[SYSTEM]")):
             from domain_router import classify
             from memory import get_memory_manager
             domains = classify(last_human).domains
+            _ctx_breakdown["domains"] = domains
             mgr = get_memory_manager()
             memories = mgr.retrieve(last_human, domains=domains, limit=3)
             files = mgr.search_files(last_human, domains=domains, limit=2)
+            _ctx_breakdown["memories_retrieved"] = len(memories)
+            _ctx_breakdown["files_retrieved"] = len(files)
             mem_ctx = mgr.format_for_prompt(memories, files)
             if mem_ctx:
+                _ctx_breakdown["memory_ctx_chars"] = len(mem_ctx)
                 system_parts.append(f"\n{mem_ctx}")
     except Exception:
         pass
 
     full_system = "\n\n".join(system_parts)
+    _ctx_breakdown["total_system_chars"] = len(full_system)
+    _ctx_breakdown["estimated_system_tokens"] = _estimate_tokens(full_system)
     filtered = [m for m in messages if not isinstance(m, SystemMessage)]
     final_messages = [SystemMessage(content=full_system)] + filtered
 
@@ -316,29 +370,82 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
     response = await combined_llm.ainvoke(final_messages, config=ck_config)
     logger.debug("chatbot_node tool_calls=%s", [tc.get("name") for tc in getattr(response, "tool_calls", [])])
 
-    # Log to Langfuse: full context, token counts, model
+    # Log to Langfuse: full context, token counts, model, context breakdown
     if _lf:
         try:
-            usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {})
-            input_tokens = (usage.get("input_tokens") or usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "input_tokens", 0)
-            output_tokens = (usage.get("output_tokens") or usage.get("completion_tokens") or 0) if isinstance(usage, dict) else getattr(usage, "output_tokens", 0)
+            # Extract token usage from response
+            token_usage = _extract_token_usage(response)
             model_name = getattr(response, "response_metadata", {}).get("model_name", llm_model)
+
+            # If no token counts from API, estimate from content
+            if token_usage["input"] == 0:
+                total_input_chars = sum(
+                    len(m.content) if isinstance(m.content, str) else len(json.dumps(m.content))
+                    for m in final_messages
+                )
+                token_usage["input"] = _estimate_tokens(str(total_input_chars))
+                token_usage["estimated"] = True
+            if token_usage["output"] == 0:
+                out_content = response.content if isinstance(response.content, str) else json.dumps(response.content)
+                token_usage["output"] = _estimate_tokens(out_content)
+                token_usage["estimated"] = True
+            token_usage["total"] = token_usage["input"] + token_usage["output"]
 
             def _msg_to_dict(m):
                 role = m.type if hasattr(m, "type") else "user"
-                # Normalize LangChain message types to OpenAI roles
                 role = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}.get(role, role)
                 content = m.content if isinstance(m.content, str) else json.dumps(m.content)
                 return {"role": role, "content": content}
 
-            trace = _lf.trace(name="astra_turn", tags=["astra"])
+            # Extract tool calls if any
+            tool_calls = []
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = [{"name": tc.get("name"), "args": tc.get("args", {})} for tc in response.tool_calls]
+
+            # Get session ID from config
+            session_id = config.get("configurable", {}).get("thread_id", "unknown")
+
+            # Create or get trace for this session
+            trace = _lf.trace(
+                name="astra_turn",
+                session_id=session_id,
+                user_id="mike",  # persona
+                tags=["astra", trigger],
+                metadata={
+                    "trigger": trigger,
+                    "needs_ui": needs_ui,
+                },
+            )
+
+            # Log the generation with full context breakdown
             trace.generation(
-                name="chatbot",
+                name="chatbot_llm",
                 model=model_name,
                 input=[_msg_to_dict(m) for m in final_messages],
                 output=response.content if isinstance(response.content, str) else json.dumps(response.content),
-                usage={"input": input_tokens, "output": output_tokens, "total": input_tokens + output_tokens},
+                usage=token_usage,
+                metadata={
+                    "context_breakdown": _ctx_breakdown,
+                    "tool_calls": tool_calls,
+                    "message_count": len(final_messages),
+                    "system_prompt_tokens_est": _ctx_breakdown.get("estimated_system_tokens", 0),
+                },
             )
+
+            # Log context components as spans for detailed analysis
+            trace.span(
+                name="context_injection",
+                metadata={
+                    "base_system_tokens": _estimate_tokens(BASE_SYSTEM),
+                    "ui_catalog_tokens": _estimate_tokens(UI_CATALOG) if needs_ui else 0,
+                    "memory_tokens": _estimate_tokens(str(_ctx_breakdown.get("memory_ctx_chars", 0))),
+                    "memories_count": _ctx_breakdown.get("memories_retrieved", 0),
+                    "files_count": _ctx_breakdown.get("files_retrieved", 0),
+                    "domains": _ctx_breakdown.get("domains", []),
+                    "total_context_chars": _ctx_breakdown.get("total_system_chars", 0),
+                },
+            )
+
             _lf.flush()
         except Exception as e:
             logger.debug("Langfuse log failed (non-critical): %s", e)
@@ -369,6 +476,8 @@ import re
 
 _PREFERENCE_PATTERNS = [
     (r"\b(?:i (?:prefer|like|want|love|hate|don'?t like|always|never))\b", "fact"),
+    (r"\b(?:i (?:am |'m )?interested in)\b", "fact"),  # "I am interested in stock alerts"
+    (r"\b(?:notify me|alert me|tell me about|keep me (?:updated|informed))\b", "fact"),
     (r"\b(?:remind me|don'?t forget|remember that|note that)\b", "reminder"),
     (r"\b(?:i decided|we agreed|the plan is|going with)\b", "episode"),
     (r"\b(?:my (?:favorite|preferred|usual))\b", "fact"),
@@ -424,16 +533,49 @@ async def _extract_and_store_memories(user_msg: str, agent_response_text: str):
 async def tool_node(state: GraphState, config: RunnableConfig):
     """Run tools. If any data tool ran, set needs_ui=True for the next chatbot turn.
     If emit_ui was called, extract the surface data and push it into ui_event state."""
+    import time
     last = state["messages"][-1]
     called_tools = []
+    tool_args = {}
     if hasattr(last, "tool_calls"):
         engine = get_workflow_engine()
         for tc in last.tool_calls:
             name = tc.get("name", "unknown")
             called_tools.append(name)
+            tool_args[name] = tc.get("args", {})
             engine.log_action(name)
 
+    start_time = time.time()
     result = await _builtin_tool_node.ainvoke(state)
+    elapsed_ms = (time.time() - start_time) * 1000
+
+    # Log tool executions to Langfuse
+    if _lf and called_tools:
+        try:
+            session_id = config.get("configurable", {}).get("thread_id", "unknown")
+            trace = _lf.trace(
+                name="tool_execution",
+                session_id=session_id,
+                user_id="mike",
+                tags=["astra", "tools"],
+            )
+            for tool_name in called_tools:
+                trace.span(
+                    name=f"tool:{tool_name}",
+                    metadata={
+                        "tool_name": tool_name,
+                        "args": tool_args.get(tool_name, {}),
+                        "is_data_tool": tool_name in DATA_TOOLS,
+                    },
+                )
+            trace.update(metadata={
+                "tools_called": called_tools,
+                "duration_ms": round(elapsed_ms, 2),
+                "tool_count": len(called_tools),
+            })
+            _lf.flush()
+        except Exception as e:
+            logger.debug("Langfuse tool log failed: %s", e)
 
     # Did any data tool run? If so, next chatbot turn needs the UI catalog
     ran_data_tool = any(t in DATA_TOOLS for t in called_tools)

@@ -33,15 +33,55 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* Canvas — free-form desktop */
+/* Canvas — grid-based desktop */
 .aios-desktop {
   position: relative;
-  overflow: hidden;
+  overflow: auto;
 }
 
-/* ===== Floating Window ===== */
-.aios-window {
+/* React Grid Layout overrides */
+.aios-grid-layout {
+  min-height: 100%;
+}
+
+.react-grid-item {
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.react-grid-item.react-grid-placeholder {
+  background: rgba(59, 130, 246, 0.15);
+  border: 2px dashed var(--accent-blue);
+  border-radius: 12px;
+  opacity: 0.8;
+}
+
+.react-grid-item > .react-resizable-handle {
   position: absolute;
+  width: 20px;
+  height: 20px;
+  bottom: 0;
+  right: 0;
+  cursor: se-resize;
+}
+
+.react-grid-item > .react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  opacity: 0.3;
+}
+
+.react-grid-item:hover > .react-resizable-handle::after {
+  opacity: 0.6;
+}
+
+/* ===== Grid Window (inside react-grid-layout) ===== */
+.aios-window {
   background: rgba(20, 27, 45, 0.92);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(148, 163, 184, 0.12);
@@ -50,8 +90,9 @@ html, body, #root {
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(148, 163, 184, 0.06);
   transition: box-shadow var(--transition-fast);
-  min-width: 200px;
-  min-height: 100px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 .aios-window:hover,
 .aios-window:focus-within {
@@ -224,6 +265,32 @@ html, body, #root {
   background: var(--bg-panel);
   border-left: 1px solid var(--border-subtle);
   overflow: hidden;
+  position: relative;
+}
+
+/* CopilotKit root fills the panel */
+.aios-chat-panel .copilotKitChat {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Messages area: scrollable, takes remaining space */
+.aios-chat-panel .copilotKitMessages {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+}
+
+/* Input container: never shrinks, always visible at bottom */
+.aios-chat-panel .copilotKitInputContainer,
+.aios-chat-panel .copilotKitInput {
+  flex-shrink: 0 !important;
+  width: 100% !important;
 }
 
 /* Card variants */
@@ -729,3 +796,4 @@ html, body, #root {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
