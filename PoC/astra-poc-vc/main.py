@@ -1,21 +1,26 @@
+"""Astra backend — FastAPI server with CopilotKit AG-UI, WebSocket, and REST endpoints."""
+
 import os
 import json
 import logging
 import asyncio
+import uuid as _uuid
 from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage
 
 from agent import get_agent_response_stream, graph
 from session import SessionManager
 from copilotkit import LangGraphAGUIAgent
 from ag_ui.core.types import RunAgentInput
 from ag_ui.encoder import EventEncoder
+from email_poller import run_email_poller
 from models import (
     serialize_server_message,
     parse_client_message,
@@ -27,40 +32,21 @@ from models import (
     SessionInitMessage,
 )
 
-# Load environment variables
 load_dotenv()
 
-# Debug mode: set DEBUG=1 in .env to log all WS messages
 DEBUG = os.getenv("DEBUG", "0") == "1"
 logger = logging.getLogger("astra")
-# Always show INFO level so we can see CopilotKit request details
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 if DEBUG:
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.setLevel(logging.DEBUG)
-    logger.debug("Debug mode enabled — all WebSocket messages will be logged")
 
-
-def _debug_send(session_id: str, data: str):
-    if DEBUG:
-        logger.debug("WS ⬆ [%s] %s", session_id, data[:300])
-
-
-def _debug_recv(session_id: str, data: str):
-    if DEBUG:
-        logger.debug("WS ⬇ [%s] %s", session_id, data[:300])
-
-# App-level readiness flag for health check (Req 7.3)
+# ── App state ─────────────────────────────────────────────────────────────────
 _ready = False
-
-# Track active WebSocket connections for email polling push
-_active_connections: dict[str, WebSocket] = {}  # session_id -> websocket
-_seen_email_ids: set[str] = set()  # track already-processed email IDs
-
-# Per-session lock to prevent poller and user messages from interleaving
+_active_connections: dict[str, WebSocket] = {}
+_seen_email_ids: set[str] = set()
 _session_locks: dict[str, asyncio.Lock] = {}
-
-EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "120"))  # seconds (default 2 min)
+EMAIL_POLL_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "300"))
+session_manager = SessionManager()
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -69,186 +55,40 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks[session_id]
 
 
-async def _email_poller():
-    """Background task: polls for new emails and triggers agent for relevant ones.
+# ── Stream helpers (shared by WS + REST) ──────────────────────────────────────
 
-    Non-blocking: runs in background, doesn't block user interaction.
-    Workflow-aware: checks enabled workflows before processing.
-    Context-aware: checks user interests/preferences FIRST, then pulls relevant files/memories.
-    """
-    from providers.factory import get_email_provider
-    from workflow_engine import get_workflow_engine
-    from domain_router import classify, classify_email
-    from memory import get_memory_manager
+def _extract_text(chunk_content) -> str:
+    """Extract plain text from a LangChain chunk content (str or list of blocks)."""
+    if isinstance(chunk_content, str):
+        return chunk_content
+    if isinstance(chunk_content, list):
+        return "".join(
+            b.get("text", "") if isinstance(b, dict) else str(b)
+            for b in chunk_content
+        )
+    return ""
 
-    logger.info("Email poller started (interval=%ds)", EMAIL_POLL_INTERVAL)
 
-    # Wait for first connection
-    while not _active_connections:
-        await asyncio.sleep(2)
+def _build_widget_msg(tool_input: dict) -> WidgetMessage:
+    """Build a WidgetMessage from render_widget tool input."""
+    grid: GridOptions = {}
+    if "width_percent" in tool_input:
+        grid["w"] = max(1, min(12, int(tool_input["width_percent"] * 12 / 100)))
+    if "height_px" in tool_input:
+        grid["h"] = max(1, int(int(tool_input["height_px"]) / 10))
+    return {
+        "type": "widget",
+        "id": tool_input.get("id", "widget"),
+        "html": tool_input.get("html", ""),
+        "grid": grid,
+    }
 
-    # Give the background fetch time to seed seen IDs before we start polling
-    await asyncio.sleep(10)
 
-    # Seed seen IDs from current inbox (so we don't re-trigger on existing emails)
-    try:
-        provider = get_email_provider()
-        initial = await provider.list_emails(limit=20)
-        for e in initial:
-            _seen_email_ids.add(e.id)
-        logger.info("Email poller seeded with %d existing email IDs", len(_seen_email_ids))
-    except Exception as ex:
-        logger.warning("Email poller seed failed: %s", ex)
-
-    while True:
-        await asyncio.sleep(EMAIL_POLL_INTERVAL)
-
-        if not _active_connections:
-            continue
-
-        try:
-            provider = get_email_provider()
-            emails = await provider.list_emails(limit=10)
-
-            new_emails = [e for e in emails if e.id not in _seen_email_ids]
-            if not new_emails:
-                continue
-
-            for e in new_emails:
-                _seen_email_ids.add(e.id)
-
-            logger.info("Email poller found %d new email(s)", len(new_emails))
-
-            engine = get_workflow_engine()
-            mgr = get_memory_manager()
-
-            # ── INTELLIGENT NOTIFICATION: check user interests/preferences first ──
-            # Retrieve user's stored interests, preferences, and facts
-            user_interests = []
-            interest_domains = set()
-            try:
-                # Get user preferences/facts about what they want to be notified about
-                interest_memories = mgr.retrieve(
-                    "what am I interested in alerts notifications preferences",
-                    memory_type="fact",
-                    limit=5,
-                )
-                for mem in interest_memories:
-                    content = mem.get("content", "").lower()
-                    user_interests.append(content)
-                    # Extract domains from the interest
-                    interest_result = classify(content)
-                    interest_domains.update(interest_result.domains)
-                logger.debug("User interests found: %s, domains: %s", user_interests, interest_domains)
-            except Exception as ex:
-                logger.debug("Failed to retrieve user interests: %s", ex)
-
-            # Process each new email without blocking user messages
-            for e in new_emails:
-                email_text = f"{e.subject} {e.body}"
-
-                # ── Step 1: Classify email into domains ──
-                email_classification = classify_email(e.subject, e.body, e.from_addr)
-                email_domains = set(email_classification.domains)
-
-                # ── Step 2: Check if email matches user's stored interests ──
-                matches_user_interest = bool(email_domains & interest_domains)
-
-                # Also check for explicit keyword matches from user interests
-                if not matches_user_interest and user_interests:
-                    for interest in user_interests:
-                        # Check if any interest keywords appear in the email
-                        interest_keywords = ["stock", "alert", "finance", "market", "trading"]
-                        for kw in interest_keywords:
-                            if kw in interest and kw in email_text.lower():
-                                matches_user_interest = True
-                                break
-                        if matches_user_interest:
-                            break
-
-                # ── Step 3: Fallback to hardcoded check for stock-related emails ──
-                is_stock_email = "finance" in email_domains or any(
-                    kw in email_text.lower()
-                    for kw in ["stock", "market", "nvda", "aapl", "msft", "tsla", "goog", "amzn", "meta", "bloomberg"]
-                )
-                is_bloomberg = "bloomberg" in e.from_addr.lower()
-
-                # Check if bloomberg workflow is enabled — auto-execute if so
-                bloomberg_workflow_enabled = engine.is_enabled("bloomberg_stock_alert")
-
-                # ── Step 4: Decide relevance based on user context ──
-                should_notify = is_stock_email or is_bloomberg or matches_user_interest
-
-                if not should_notify:
-                    logger.debug("Email '%s' not relevant to user interests, skipping notification", e.subject[:40])
-                    continue
-
-                # Build context-aware prompt
-                if is_stock_email or is_bloomberg or ("finance" in interest_domains and matches_user_interest):
-                    # Pull relevant context from memory/files for finance domain
-                    context_hint = ""
-                    try:
-                        memories = mgr.retrieve(email_text[:500], domains=["finance"], limit=2)
-                        files = mgr.search_files(email_text[:300], domains=["finance"], limit=2)
-                        if memories:
-                            context_hint += "\n\nRelevant memories:\n" + "\n".join(
-                                f"- {m.get('content', '')[:100]}" for m in memories
-                            )
-                        if files:
-                            context_hint += "\n\nRelevant files (read if needed):\n" + "\n".join(
-                                f"- {f.get('filename', '')}: {f.get('summary', '')[:80]}" for f in files
-                            )
-                        # Also mention user's interest for context
-                        if user_interests:
-                            context_hint += "\n\nUser interests that matched:\n" + "\n".join(
-                                f"- {interest[:100]}" for interest in user_interests[:2]
-                            )
-                    except Exception:
-                        pass
-
-                    auto_mode = " (AUTO-WORKFLOW: bloomberg_stock_alert is enabled)" if bloomberg_workflow_enabled else ""
-                    interest_note = " (matches user's stored interest)" if matches_user_interest else ""
-                    prompt = (
-                        f"[SYSTEM] New stock-related email detected{auto_mode}{interest_note}:\n\n"
-                        f"From: {e.from_addr}\n"
-                        f"Subject: {e.subject}\n"
-                        f"Body: {e.body[:500]}\n"
-                        f"{context_hint}\n\n"
-                        f"INSTRUCTIONS: This email matches the user's interests. "
-                        f"1. Call `analyze_stock_email_context` with subject, body, and email_id='{e.id}'\n"
-                        f"2. Call `get_stock_quote` for each matched ticker\n"
-                        f"3. If relevant files were found above, call `read_user_file` to get full context\n"
-                        f"4. Render a stock alert widget (surface_id='stock-alert') combining email + file insights\n"
-                        f"Keep the notification concise but actionable."
-                    )
-                else:
-                    # Generic email notification for non-finance matches
-                    prompt = (
-                        f"[SYSTEM] New email detected (matched user interests: {list(email_domains & interest_domains)}):\n\n"
-                        f"From: {e.from_addr}\n"
-                        f"Subject: {e.subject}\n"
-                        f"Body: {e.body[:300]}\n\n"
-                        f"INSTRUCTIONS: Show a notification for this email that matches the user's interests. "
-                        f"Summarize why this might be relevant based on their stored preferences."
-                    )
-
-                for sid, ws in list(_active_connections.items()):
-                    lock = _get_session_lock(sid)
-                    # Use lock so poller waits if user is mid-message
-                    try:
-                        async with lock:
-                            await _handle_user_message(ws, prompt, sid)
-                    except Exception as ex:
-                        logger.warning("Poller push failed for session %s: %s", sid, ex)
-
-        except Exception as ex:
-            logger.warning("Email poller error: %s", ex)
-
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ready
-    # Index user files into memory on startup (non-blocking, best-effort)
     try:
         from tools_files import index_all_files
         indexed = index_all_files()
@@ -256,26 +96,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("File indexing failed (non-critical): %s", e)
     _ready = True
-    poller_task = asyncio.create_task(_email_poller())
+    poller_task = asyncio.create_task(
+        run_email_poller(
+            active_connections=_active_connections,
+            seen_email_ids=_seen_email_ids,
+            get_session_lock=_get_session_lock,
+            handle_user_message=_handle_user_message,
+            poll_interval=EMAIL_POLL_INTERVAL,
+        )
+    )
     yield
     poller_task.cancel()
 
 
-app = FastAPI(title="LangChain GenUI Web Agent PoC", lifespan=lifespan)
+app = FastAPI(title="Astra AI Agent", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# CORS middleware for CopilotKit frontend
-from starlette.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# Shared session manager
-session_manager = SessionManager()
+# ── CopilotKit / AG-UI Endpoint ──────────────────────────────────────────────
 
-# --- CopilotKit / AG-UI Endpoint ---
 _agui_agent = LangGraphAGUIAgent(
     name="astra_agent",
     description="Astra AI assistant with email, calendar, stock, and travel tools.",
@@ -283,12 +122,23 @@ _agui_agent = LangGraphAGUIAgent(
 )
 
 _copilotkit_info = {
-    "agents": {
-        "astra_agent": {"description": _agui_agent.description or ""},
-    },
+    "agents": {"astra_agent": {"description": _agui_agent.description or ""}},
     "actions": {},
     "version": "0.1.78",
 }
+
+
+def _parse_agent_input(payload: dict) -> RunAgentInput:
+    """Build RunAgentInput from a CopilotKit payload dict."""
+    return RunAgentInput(
+        thread_id=payload.get("threadId", payload.get("thread_id", str(_uuid.uuid4()))),
+        run_id=payload.get("runId", payload.get("run_id", str(_uuid.uuid4()))),
+        state=payload.get("state", {}),
+        messages=payload.get("messages", []),
+        tools=payload.get("tools", []),
+        context=payload.get("context", []),
+        forwarded_props=payload.get("forwardedProps", payload.get("forwarded_props", {})),
+    )
 
 
 @app.api_route("/api/copilotkit", methods=["GET", "POST"])
@@ -301,28 +151,14 @@ async def copilotkit_single_endpoint(request: Request):
     method = body.get("method", "")
     logger.info("CopilotKit POST method=%s", method)
 
-    # Info / discovery
     if method == "info" or not method:
         return JSONResponse(_copilotkit_info)
 
-    # Agent connect/run — payload is in body["body"], not body["params"]
     if method.startswith("agent/"):
-        # CopilotKit sends: {"method": "agent/run", "params": {"agentId": "..."}, "body": {actual payload}}
         payload = body.get("body") or body.get("params", {})
-        accept_header = request.headers.get("accept", "")
-        encoder = EventEncoder(accept=accept_header)
-
-        import uuid as _uuid
-        agent_input = RunAgentInput(
-            thread_id=payload.get("threadId", payload.get("thread_id", str(_uuid.uuid4()))),
-            run_id=payload.get("runId", payload.get("run_id", str(_uuid.uuid4()))),
-            state=payload.get("state", {}),
-            messages=payload.get("messages", []),
-            tools=payload.get("tools", []),
-            context=payload.get("context", []),
-            forwarded_props=payload.get("forwardedProps", payload.get("forwarded_props", {})),
-        )
+        agent_input = _parse_agent_input(payload)
         logger.info("CopilotKit agent run: thread=%s msgs=%d", agent_input.thread_id, len(agent_input.messages))
+        encoder = EventEncoder(accept=request.headers.get("accept", ""))
 
         async def event_generator():
             async for event in _agui_agent.run(agent_input):
@@ -341,64 +177,42 @@ async def copilotkit_info_get():
 @app.post("/api/copilotkit/{path:path}")
 async def copilotkit_rest_agent(request: Request, path: str):
     """REST transport fallback: /api/copilotkit/agent/<name>/run"""
-    if path.startswith("agent/"):
-        body = await request.json()
-        accept_header = request.headers.get("accept", "")
-        encoder = EventEncoder(accept=accept_header)
+    if not path.startswith("agent/"):
+        return JSONResponse({"error": "Not found"}, status_code=404)
 
-        import uuid as _uuid
-        agent_input = RunAgentInput(
-            thread_id=body.get("threadId", body.get("thread_id", str(_uuid.uuid4()))),
-            run_id=body.get("runId", body.get("run_id", str(_uuid.uuid4()))),
-            state=body.get("state", {}),
-            messages=body.get("messages", []),
-            tools=body.get("tools", []),
-            context=body.get("context", []),
-            forwarded_props=body.get("forwardedProps", body.get("forwarded_props", {})),
-        )
+    body = await request.json()
+    agent_input = _parse_agent_input(body)
+    encoder = EventEncoder(accept=request.headers.get("accept", ""))
 
-        async def event_generator():
-            async for event in _agui_agent.run(agent_input):
-                yield encoder.encode(event)
+    async def event_generator():
+        async for event in _agui_agent.run(agent_input):
+            yield encoder.encode(event)
 
-        return StreamingResponse(event_generator(), media_type=encoder.get_content_type())
-
-    return JSONResponse({"error": "Not found"}, status_code=404)
+    return StreamingResponse(event_generator(), media_type=encoder.get_content_type())
 
 
-# --- Health Check (Req 7.1, 7.2, 7.3) ---
+# ── Health Check ──────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health_check():
-    """Returns 200 when the server is ready, 503 while initializing."""
     if not _ready:
         return JSONResponse({"status": "initializing"}, status_code=503)
     return {"status": "ok"}
 
 
-# --- WebSocket Endpoint (Req 1.1–1.8, 5.1, 5.2, 8.1–8.4) ---
+# ── WebSocket Endpoint ────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None):
-    """
-    Accepts a WebSocket connection. Reads JSON messages from the client,
-    dispatches to the LangGraph agent, and streams responses back.
-    """
     await websocket.accept()
-
-    # Create or resume session (Req 8.1, 8.3, 8.4)
     sid = session_manager.get_or_create(session_id)
 
-    # Send session_init message on connect
     init_msg: SessionInitMessage = {"type": "session_init", "session_id": sid}
-    payload = serialize_server_message(init_msg)
-    _debug_send(sid, payload)
-    await websocket.send_text(payload)
+    await websocket.send_text(serialize_server_message(init_msg))
 
-    # Register for email polling push BEFORE background task so poller can find us
     _active_connections[sid] = websocket
 
-    # Lightweight greeting — non-blocking, lets user type immediately
+    # Lightweight greeting
     await _handle_user_message(
         websocket,
         "[SYSTEM] Session started. Greet Mike briefly (one sentence) and tell him "
@@ -406,16 +220,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
         sid,
     )
 
-    # Fire the heavy fetch as a background task so the UI is immediately usable
+    # Background dashboard fetch
     async def _background_fetch():
-        await asyncio.sleep(0.5)  # small yield so WS loop starts
-        if sid not in _active_connections:
-            return
+        await asyncio.sleep(0.5)
         ws = _active_connections.get(sid)
         if not ws:
             return
-        lock = _get_session_lock(sid)
-        async with lock:
+        async with _get_session_lock(sid):
             await _handle_user_message(
                 ws,
                 "[SYSTEM] Background fetch: now load Mike's dashboard.\n"
@@ -434,9 +245,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
     try:
         while True:
             raw = await websocket.receive_text()
-            _debug_recv(sid, raw)
-
-            # Parse incoming message (Req 1.7 — malformed JSON)
             try:
                 msg = parse_client_message(raw)
             except ValueError as exc:
@@ -444,192 +252,78 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
                 await websocket.send_text(serialize_server_message(err))
                 continue
 
-            if msg["type"] == "user_message":
-                lock = _get_session_lock(sid)
-                async with lock:
+            async with _get_session_lock(sid):
+                if msg["type"] == "user_message":
                     await _handle_user_message(websocket, msg["content"], sid)
-
-            elif msg["type"] == "widget_event":
-                lock = _get_session_lock(sid)
-                async with lock:
-                    await _handle_widget_event(
-                        websocket, msg["event_name"], msg["payload"], sid
-                    )
+                elif msg["type"] == "widget_event":
+                    await _handle_widget_event(websocket, msg["event_name"], msg["payload"], sid)
 
     except WebSocketDisconnect:
         _active_connections.pop(sid, None)
         _session_locks.pop(sid, None)
 
 
-async def _handle_user_message(
-    websocket: WebSocket, content: str, session_id: str
-) -> None:
-    """Invoke the LangGraph agent and stream typed messages back."""
-    config = session_manager.get_config(session_id)
+# ── WS stream handlers ───────────────────────────────────────────────────────
+
+async def _stream_agent_to_ws(websocket: WebSocket, content: str, session_id: str) -> None:
+    """Core streaming loop: invoke agent and forward tokens/widgets to WebSocket."""
     content_buffer = ""
+    async for event in get_agent_response_stream(content, conversation_id=session_id):
+        kind = event["event"]
+        name = event.get("name", "")
 
-    try:
-        async for event in get_agent_response_stream(content, conversation_id=session_id):
-            kind = event["event"]
-            name = event.get("name", "")
+        if kind == "on_chat_model_stream":
+            chunk = event["data"]["chunk"]
+            if hasattr(chunk, "content") and chunk.content:
+                text = _extract_text(chunk.content)
+                if text:
+                    content_buffer += text
+                    await websocket.send_text(serialize_server_message({"type": "token", "content": text}))
 
-            # Streaming tokens (Req 1.4)
-            if kind == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                if hasattr(chunk, "content") and chunk.content:
-                    text = chunk.content
-                    if isinstance(text, list):
-                        text = "".join(
-                            block.get("text", "") if isinstance(block, dict) else str(block)
-                            for block in text
-                        )
+        elif kind == "on_tool_start" and name == "render_widget":
+            widget_msg = _build_widget_msg(event["data"].get("input", {}))
+            await websocket.send_text(serialize_server_message(widget_msg))
+
+        elif kind == "on_chain_end" and name == "chatbot":
+            node_output = event["data"].get("output", {})
+            msgs = node_output.get("messages", [])
+            if msgs:
+                last = msgs[-1]
+                if hasattr(last, "content") and last.content and not content_buffer:
+                    text = _extract_text(last.content)
                     if text:
-                        content_buffer += text
-                        token_msg: TokenMessage = {"type": "token", "content": text}
-                        await websocket.send_text(serialize_server_message(token_msg))
+                        await websocket.send_text(serialize_server_message({"type": "token", "content": text}))
+                if hasattr(last, "tool_calls") and last.tool_calls:
+                    for tc in last.tool_calls:
+                        if tc.get("name") == "render_widget":
+                            widget_msg = _build_widget_msg(tc.get("args", {}))
+                            await websocket.send_text(serialize_server_message(widget_msg))
 
-            # Widget tool invocation (Req 1.5)
-            elif kind == "on_tool_start" and name == "render_widget":
-                tool_input = event["data"].get("input", {})
-                grid: GridOptions = {}
-                if "width_percent" in tool_input:
-                    grid["w"] = max(1, min(12, int(tool_input["width_percent"] * 12 / 100)))
-                if "height_px" in tool_input:
-                    grid["h"] = max(1, int(int(tool_input["height_px"]) / 10))
 
-                widget_msg: WidgetMessage = {
-                    "type": "widget",
-                    "id": tool_input.get("id", "widget"),
-                    "html": tool_input.get("html", ""),
-                    "grid": grid,
-                }
-                await websocket.send_text(serialize_server_message(widget_msg))
-
-            # Fallback for non-streaming LLMs
-            elif kind == "on_chain_end" and name == "chatbot":
-                node_output = event["data"].get("output", {})
-                if "messages" in node_output and node_output["messages"]:
-                    last_message = node_output["messages"][-1]
-
-                    if hasattr(last_message, "content") and last_message.content and not content_buffer:
-                        text = last_message.content
-                        if isinstance(text, list):
-                            text = "".join(
-                                block.get("text", "") if isinstance(block, dict) else str(block)
-                                for block in text
-                            )
-                        if text:
-                            token_msg = {"type": "token", "content": text}
-                            await websocket.send_text(serialize_server_message(token_msg))
-
-                    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                        for tcall in last_message.tool_calls:
-                            if tcall.get("name") == "render_widget":
-                                args = tcall.get("args", {})
-                                grid = {}
-                                if "width_percent" in args:
-                                    grid["w"] = max(1, min(12, int(args["width_percent"] * 12 / 100)))
-                                if "height_px" in args:
-                                    grid["h"] = max(1, int(int(args["height_px"]) / 10))
-                                widget_msg = {
-                                    "type": "widget",
-                                    "id": args.get("id", "widget"),
-                                    "html": args.get("html", ""),
-                                    "grid": grid,
-                                }
-                                await websocket.send_text(serialize_server_message(widget_msg))
-
+async def _handle_user_message(websocket: WebSocket, content: str, session_id: str) -> None:
+    """Invoke agent and stream back, with error handling and done signal."""
+    try:
+        await _stream_agent_to_ws(websocket, content, session_id)
     except Exception as exc:
-        # Unhandled exception during agent processing (Req 1.8)
         err_msg: ErrorMessage = {"type": "error", "content": f"Agent error: {exc}"}
         await websocket.send_text(serialize_server_message(err_msg))
-
-    # Always send done to signal stream completion (Req 1.6)
-    done_msg: DoneMessage = {"type": "done"}
-    await websocket.send_text(serialize_server_message(done_msg))
+    await websocket.send_text(serialize_server_message({"type": "done"}))
 
 
 async def _handle_widget_event(
     websocket: WebSocket, event_name: str, payload: dict, session_id: str
 ) -> None:
-    """Forward a widget event to the agent as a HumanMessage with event context.
-
-    Special handling for workflow actions (workflow_enable, workflow_dismiss)
-    to provide immediate feedback without LLM roundtrip.
-    """
-    # Handle workflow actions directly
-    action = payload.get("action", "")
-    if action.startswith("workflow_enable:"):
-        workflow_id = action.split(":", 1)[1]
-        from workflow_engine import get_workflow_engine
-        engine = get_workflow_engine()
-        engine.enable(workflow_id)
-        workflows = engine.list_workflows()
-        wf = next((w for w in workflows if w["id"] == workflow_id), {})
-        token_msg: TokenMessage = {
-            "type": "token",
-            "content": f"Workflow **{wf.get('name', workflow_id)}** is now enabled. "
-                       f"It will run automatically when {wf.get('trigger', 'triggered')}."
-        }
-        await websocket.send_text(serialize_server_message(token_msg))
-        done_msg: DoneMessage = {"type": "done"}
-        await websocket.send_text(serialize_server_message(done_msg))
-        return
-
-    if action.startswith("workflow_dismiss:"):
-        workflow_id = action.split(":", 1)[1]
-        token_msg: TokenMessage = {
-            "type": "token",
-            "content": f"Got it, I won't ask about this workflow again this session."
-        }
-        await websocket.send_text(serialize_server_message(token_msg))
-        done_msg: DoneMessage = {"type": "done"}
-        await websocket.send_text(serialize_server_message(done_msg))
-        return
-
+    """Forward a widget event to the agent."""
     human_text = json.dumps({"widget_event": event_name, "payload": payload})
     try:
-        async for event in get_agent_response_stream(human_text, conversation_id=session_id):
-            kind = event["event"]
-            name = event.get("name", "")
-
-            if kind == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                if hasattr(chunk, "content") and chunk.content:
-                    text = chunk.content
-                    if isinstance(text, list):
-                        text = "".join(
-                            block.get("text", "") if isinstance(block, dict) else str(block)
-                            for block in text
-                        )
-                    if text:
-                        token_msg: TokenMessage = {"type": "token", "content": text}
-                        await websocket.send_text(serialize_server_message(token_msg))
-
-            elif kind == "on_tool_start" and name == "render_widget":
-                tool_input = event["data"].get("input", {})
-                grid: GridOptions = {}
-                if "width_percent" in tool_input:
-                    grid["w"] = max(1, min(12, int(tool_input["width_percent"] * 12 / 100)))
-                if "height_px" in tool_input:
-                    grid["h"] = max(1, int(int(tool_input["height_px"]) / 10))
-                widget_msg: WidgetMessage = {
-                    "type": "widget",
-                    "id": tool_input.get("id", "widget"),
-                    "html": tool_input.get("html", ""),
-                    "grid": grid,
-                }
-                await websocket.send_text(serialize_server_message(widget_msg))
-
+        await _stream_agent_to_ws(websocket, human_text, session_id)
     except Exception as exc:
         err_msg: ErrorMessage = {"type": "error", "content": f"Agent error: {exc}"}
         await websocket.send_text(serialize_server_message(err_msg))
-
-    done_msg: DoneMessage = {"type": "done"}
-    await websocket.send_text(serialize_server_message(done_msg))
+    await websocket.send_text(serialize_server_message({"type": "done"}))
 
 
-# --- Backward-compatible POST /chat endpoint ---
+# ── Legacy REST chat endpoint ─────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
@@ -637,100 +331,53 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    """
-    Streams LangGraph events and captures GenUI components.
-    Preserved temporarily for backward compatibility.
-    """
-    user_message = request.message
-
+    """Legacy SSE chat endpoint — preserved for backward compatibility."""
     async def event_generator():
         content_buffer = ""
-
         try:
-            async for event in get_agent_response_stream(user_message, conversation_id="session_4"):
+            async for event in get_agent_response_stream(request.message, conversation_id="session_4"):
                 kind = event["event"]
                 name = event.get("name", "")
 
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
-                        content = chunk.content
-                        if isinstance(content, list):
-                            content = "".join(
-                                block.get("text", "") if isinstance(block, dict) else str(block)
-                                for block in content
-                            )
-                        if content:
-                            content_buffer += content
-                            yield f"data: {json.dumps({'type': 'message', 'content': content})}\n\n"
+                        text = _extract_text(chunk.content)
+                        if text:
+                            content_buffer += text
+                            yield f"data: {json.dumps({'type': 'message', 'content': text})}\n\n"
 
                 elif kind == "on_tool_start" and name == "render_widget":
                     tool_input = event["data"].get("input", {})
-                    widget_data = {
-                        "id": tool_input.get("id", "widget"),
-                        "html": tool_input.get("html", ""),
-                        "grid": {},
-                    }
-                    if "width_percent" in tool_input:
-                        widget_data["grid"]["w"] = max(1, min(12, int(tool_input["width_percent"] * 12 / 100)))
-                    if "height_px" in tool_input:
-                        widget_data["grid"]["h"] = max(1, int(int(tool_input["height_px"]) / 10))
-                    yield f"data: {json.dumps({'type': 'ui_component', 'component': widget_data})}\n\n"
+                    widget = _build_widget_msg(tool_input)
+                    yield f"data: {json.dumps({'type': 'ui_component', 'component': widget})}\n\n"
 
                 elif kind == "on_chain_end" and name == "chatbot":
-                    node_output = event["data"].get("output", {})
-                    if "messages" in node_output and node_output["messages"]:
-                        last_message = node_output["messages"][-1]
-                        if hasattr(last_message, "content") and last_message.content and not content_buffer:
-                            content = last_message.content
-                            if isinstance(content, list):
-                                content = "".join(
-                                    block.get("text", "") if isinstance(block, dict) else str(block)
-                                    for block in content
-                                )
-                            if content:
-                                yield f"data: {json.dumps({'type': 'message', 'content': content})}\n\n"
-                        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                            for tcall in last_message.tool_calls:
-                                if tcall.get("name") == "render_widget":
-                                    args = tcall.get("args", {})
-                                    widget_data = {
-                                        "id": args.get("id", "widget"),
-                                        "html": args.get("html", ""),
-                                        "grid": {},
-                                    }
-                                    if "width_percent" in args:
-                                        widget_data["grid"]["w"] = max(1, min(12, int(args["width_percent"] * 12 / 100)))
-                                    if "height_px" in args:
-                                        widget_data["grid"]["h"] = max(1, int(int(args["height_px"]) / 10))
-                                    yield f"data: {json.dumps({'type': 'ui_component', 'component': widget_data})}\n\n"
+                    msgs = event["data"].get("output", {}).get("messages", [])
+                    if msgs:
+                        last = msgs[-1]
+                        if hasattr(last, "content") and last.content and not content_buffer:
+                            text = _extract_text(last.content)
+                            if text:
+                                yield f"data: {json.dumps({'type': 'message', 'content': text})}\n\n"
 
         except Exception as e:
-            print(f"Exception in graph stream: {e}")
-            error_msg = f"\n\n[Error: {e}]"
-            yield f"data: {json.dumps({'type': 'message', 'content': error_msg})}\n\n"
-
+            yield f"data: {json.dumps({'type': 'message', 'content': f'[Error: {e}]'})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# --- Startup event: set readiness flag ---
-
-# --- Static file serving and root page (Req 5.1, 5.2) ---
-# IMPORTANT: Mount AFTER all route definitions so /health and /ws take priority.
+# ── Static files + root ──────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """Serves the main frontend page."""
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting server on http://localhost:{port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
