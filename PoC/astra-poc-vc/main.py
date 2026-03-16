@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from agent import get_agent_response_stream, graph
+from agent import _canvas_state
 from session import SessionManager
 from copilotkit import LangGraphAGUIAgent
 from ag_ui.core.types import RunAgentInput
@@ -208,6 +209,19 @@ async def health_check():
 async def stocks_live_sse():
     """SSE stream of live stock watchlist data, refreshed every 60s."""
     return StreamingResponse(stock_subscribe(), media_type="text/event-stream")
+
+
+# ── Surface close (frontend → backend canvas sync) ───────────────────────────
+
+class SurfaceCloseRequest(BaseModel):
+    surface_id: str
+
+@app.post("/api/surface/close")
+async def surface_close(req: SurfaceCloseRequest):
+    """Remove a surface from the agent's canvas state when user closes a widget."""
+    removed = _canvas_state.pop(req.surface_id, None)
+    logger.debug("Surface closed: %s (was_tracked=%s)", req.surface_id, removed is not None)
+    return {"ok": True, "removed": removed is not None}
 
 
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────

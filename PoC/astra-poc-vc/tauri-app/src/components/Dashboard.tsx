@@ -78,6 +78,12 @@ export function Dashboard() {
       return next;
     });
     setLayout((prev) => prev.filter((l) => l.i !== id));
+    // Notify backend to remove from canvas state
+    fetch("/api/surface/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ surface_id: id }),
+    }).catch(() => {});
   }, []);
 
   const toggleMinimize = useCallback((id: string) => {
