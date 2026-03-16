@@ -14,6 +14,20 @@ MIKE_WATCHLIST = {
 ALL_TICKERS = MIKE_WATCHLIST["holdings"] + MIKE_WATCHLIST["watching"]
 
 
+def _safe(v, default=0):
+    """Return default if v is NaN, None, or inf — prevents JSON serialization crashes."""
+    if v is None:
+        return default
+    try:
+        if v != v:  # NaN check
+            return default
+        if abs(v) == float("inf"):
+            return default
+    except (TypeError, ValueError):
+        return default
+    return v
+
+
 @tool
 def get_stock_quote(ticker: str) -> str:
     """Get real-time stock quote for a ticker symbol (e.g. AAPL, MSFT, NVDA).
@@ -28,19 +42,19 @@ def get_stock_quote(ticker: str) -> str:
         if hist.empty:
             return json.dumps({"error": f"No data found for {ticker}"})
 
-        current = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2] if len(hist) > 1 else current
+        current = _safe(hist["Close"].iloc[-1])
+        prev = _safe(hist["Close"].iloc[-2] if len(hist) > 1 else current) or 1
         change = current - prev
         change_pct = (change / prev) * 100 if prev else 0
 
         return json.dumps({
             "ticker": ticker.upper(),
-            "price": round(current, 2),
-            "change": round(change, 2),
-            "change_pct": round(change_pct, 2),
-            "volume": int(hist["Volume"].iloc[-1]),
-            "day_high": round(hist["High"].iloc[-1], 2),
-            "day_low": round(hist["Low"].iloc[-1], 2),
+            "price": round(_safe(current), 2),
+            "change": round(_safe(change), 2),
+            "change_pct": round(_safe(change_pct), 2),
+            "volume": int(_safe(hist["Volume"].iloc[-1])),
+            "day_high": round(_safe(hist["High"].iloc[-1]), 2),
+            "day_low": round(_safe(hist["Low"].iloc[-1]), 2),
             "market_cap": info.get("marketCap"),
             "pe_ratio": info.get("trailingPE"),
             "52w_high": info.get("fiftyTwoWeekHigh"),
@@ -68,15 +82,15 @@ def get_watchlist_summary() -> str:
                 hist = stock.history(period="2d")
                 if hist.empty:
                     continue
-                current = hist["Close"].iloc[-1]
-                prev = hist["Close"].iloc[-2] if len(hist) > 1 else current
+                current = _safe(hist["Close"].iloc[-1])
+                prev = _safe(hist["Close"].iloc[-2] if len(hist) > 1 else current) or 1
                 change = current - prev
                 change_pct = (change / prev) * 100 if prev else 0
                 results[category].append({
                     "ticker": ticker,
-                    "price": round(current, 2),
-                    "change": round(change, 2),
-                    "change_pct": round(change_pct, 2),
+                    "price": round(_safe(current), 2),
+                    "change": round(_safe(change), 2),
+                    "change_pct": round(_safe(change_pct), 2),
                     "signal": "🟢" if change_pct > 0 else "🔴" if change_pct < 0 else "⚪",
                 })
             except:
@@ -101,11 +115,11 @@ def get_stock_history(ticker: str, period: str = "1mo") -> str:
         for date, row in hist.iterrows():
             data.append({
                 "date": date.strftime("%Y-%m-%d"),
-                "open": round(row["Open"], 2),
-                "high": round(row["High"], 2),
-                "low": round(row["Low"], 2),
-                "close": round(row["Close"], 2),
-                "volume": int(row["Volume"]),
+                "open": round(_safe(row["Open"]), 2),
+                "high": round(_safe(row["High"]), 2),
+                "low": round(_safe(row["Low"]), 2),
+                "close": round(_safe(row["Close"]), 2),
+                "volume": int(_safe(row["Volume"])),
             })
 
         return json.dumps({
@@ -180,17 +194,17 @@ def analyze_stock_email_context(email_subject: str, email_body: str, email_id: s
             hist = stock.history(period="5d")
             if hist.empty:
                 continue
-            current = hist["Close"].iloc[-1]
-            prev = hist["Close"].iloc[-2] if len(hist) > 1 else current
+            current = _safe(hist["Close"].iloc[-1])
+            prev = _safe(hist["Close"].iloc[-2] if len(hist) > 1 else current) or 1
             change_pct = ((current - prev) / prev) * 100 if prev else 0
-            week_start = hist["Close"].iloc[0]
+            week_start = _safe(hist["Close"].iloc[0]) or 1
             week_change = ((current - week_start) / week_start) * 100
 
             stock_data.append({
                 "ticker": ticker,
-                "price": round(current, 2),
-                "daily_change_pct": round(change_pct, 2),
-                "weekly_change_pct": round(week_change, 2),
+                "price": round(_safe(current), 2),
+                "daily_change_pct": round(_safe(change_pct), 2),
+                "weekly_change_pct": round(_safe(week_change), 2),
                 "in_holdings": ticker in MIKE_WATCHLIST["holdings"],
             })
         except:
