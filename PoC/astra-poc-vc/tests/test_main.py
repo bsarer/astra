@@ -1,5 +1,9 @@
 """Tests for health check and WebSocket endpoints in main.py."""
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import json
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
