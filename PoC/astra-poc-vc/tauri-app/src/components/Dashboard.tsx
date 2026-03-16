@@ -67,6 +67,9 @@ export function Dashboard() {
     if (action === "read_file" && payload?.filename) {
       msg = `read file ${payload.filename}`;
     }
+    // Clear closed state for any surface the user is re-requesting
+    // so the agent can re-create it
+    closedWindows.current.clear();
     appendMessage({ id: crypto.randomUUID(), role: "user", content: msg } as any);
   }, [appendMessage]);
 
@@ -139,6 +142,8 @@ export function Dashboard() {
     const key = `${ev.surface_id}:${ev.components.length}`;
     if (lastSurfaceRef.current === key) return;
     lastSurfaceRef.current = key;
+    // Agent is explicitly pushing this surface — allow it even if previously closed
+    closedWindows.current.delete(ev.surface_id);
     console.log("[Dashboard] useCoAgent ui_event:", ev.surface_id, ev.components.length);
     upsertWindow(ev.surface_id, ev.components, ev.grid ?? undefined);
   }, [agentState?.ui_event, upsertWindow]);

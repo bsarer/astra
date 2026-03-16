@@ -49,8 +49,8 @@ DATA_TOOLS = {
 
 def get_canvas_context() -> str:
     if not _canvas_state:
-        return "Canvas is empty."
-    lines = ["Current canvas surfaces:"]
+        return "Canvas is empty — no surfaces are visible. Re-create any surface the user requests."
+    lines = ["Currently visible canvas surfaces (ONLY these exist — anything not listed was closed by the user):"]
     for sid, info in _canvas_state.items():
         lines.append(f"  - {sid}: {info.get('summary', 'unknown')}")
     return "\n".join(lines)
