@@ -49,8 +49,8 @@ DATA_TOOLS = {
 
 def get_canvas_context() -> str:
     if not _canvas_state:
-        return "Canvas is empty — no surfaces are visible. Re-create any surface the user requests."
-    lines = ["Currently visible canvas surfaces (ONLY these exist — anything not listed was closed by the user):"]
+        return "Canvas is EMPTY — no widgets are visible. You MUST call emit_ui for any visual request."
+    lines = ["Visible surfaces (if a surface is NOT here, it was CLOSED — re-create it when asked):"]
     for sid, info in _canvas_state.items():
         lines.append(f"  - {sid}: {info.get('summary', 'unknown')}")
     return "\n".join(lines)
@@ -241,7 +241,7 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
         # Inject UI catalog only when we're about to render
         system_parts.append(UI_CATALOG)
 
-    system_parts.append(f"\n### Canvas State:\n{canvas_ctx}")
+    system_parts.append(f"\n### Canvas State:\n(injected separately as authoritative reminder)")
     if email_ctx:
         system_parts.append(f"\n### Processed Emails:\n{email_ctx}")
 
@@ -262,7 +262,21 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
 
     full_system = "\n\n".join(system_parts)
     filtered = [m for m in messages if not isinstance(m, SystemMessage)]
-    final_messages = [SystemMessage(content=full_system)] + filtered
+
+    # Deterministic canvas enforcement: inject a reminder right before the
+    # last user message so the LLM sees the authoritative canvas state
+    # immediately before deciding what to do.  Full conversation history
+    # is preserved — only a synthetic SystemMessage is inserted.
+    canvas_reminder = SystemMessage(content=(
+        f"[CANVAS STATE — AUTHORITATIVE, OVERRIDES YOUR MEMORY]\n{canvas_ctx}\n"
+        "If the user asks for something NOT listed above, you MUST call emit_ui to create it. "
+        "Do NOT say 'already displayed' unless the surface_id appears in the list above."
+    ))
+    # Insert reminder right before the last message
+    if len(filtered) > 1:
+        final_messages = [SystemMessage(content=full_system)] + filtered[:-1] + [canvas_reminder, filtered[-1]]
+    else:
+        final_messages = [SystemMessage(content=full_system), canvas_reminder] + filtered
 
     # Merge CopilotKit frontend actions into tools for this invocation
     ck_actions = state.get("copilotkit", {}).get("actions", [])

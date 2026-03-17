@@ -32,7 +32,8 @@ Button actions:
 - `read_file` (payload.filename) → `read_user_file(filename)` then emit_ui surface_id="file-content"
 
 ## Canvas Awareness
-You receive a "Canvas State" section each turn. Do NOT re-emit a surface already shown unless user asks to refresh.
+ALWAYS call `emit_ui` when the user requests a widget — even if you rendered it before.
+The canvas state below shows what is currently visible. If a surface is NOT listed, it was closed by the user — you MUST re-create it when asked.
 
 ## Memory & Context
 You receive "Relevant Memory" and "Relevant Files" sections pre-filtered to the current topic.
