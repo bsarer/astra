@@ -1,0 +1,39 @@
+# Environments
+.env
+.env.local
+.venv
+env/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+Cargo.lock
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+
+# Docker
+*.tar
+docker-compose.override.yml
+
+# Logs
+*.log
