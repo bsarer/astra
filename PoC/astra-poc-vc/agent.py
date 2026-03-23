@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
@@ -198,6 +198,60 @@ def _build_dashboard_greeting() -> tuple[list[dict], str]:
     return components, time_of_day
 
 
+def _sanitize_tool_calls(messages: list) -> list:
+    """Remove AIMessage tool_calls that lack a matching ToolMessage response.
+
+    OpenAI requires every tool_call_id in an assistant message to have a
+    corresponding tool-role message.  If the graph was interrupted mid-turn
+    (timeout, crash, etc.) the checkpointer may persist an orphaned tool call.
+    This strips those to prevent 400 errors.
+    """
+    # Collect all tool_call_ids that have a ToolMessage response
+    answered_ids: set[str] = set()
+    for m in messages:
+        # Check both ToolMessage type and role-based detection
+        if isinstance(m, ToolMessage):
+            answered_ids.add(getattr(m, "tool_call_id", ""))
+        elif getattr(m, "type", None) == "tool" or getattr(m, "role", None) == "tool":
+            answered_ids.add(getattr(m, "tool_call_id", ""))
+
+    sanitized = []
+    for m in messages:
+        if isinstance(m, AIMessage) or (getattr(m, "type", None) == "ai") or (getattr(m, "role", None) == "assistant"):
+            tc = getattr(m, "tool_calls", None) or []
+            # Also check additional_kwargs for tool_calls (some LangChain versions)
+            if not tc:
+                tc = (getattr(m, "additional_kwargs", None) or {}).get("tool_calls", [])
+            if tc:
+                good_calls = [t for t in tc if (t.get("id") or t.get("tool_call_id", "")) in answered_ids]
+                if good_calls:
+                    try:
+                        m = m.model_copy(update={"tool_calls": good_calls})
+                    except Exception:
+                        pass  # If model_copy fails, keep original
+                    sanitized.append(m)
+                elif getattr(m, "content", None):
+                    # Has text content but orphaned tool_calls — strip them
+                    try:
+                        m = m.model_copy(update={"tool_calls": []})
+                        # Also clear additional_kwargs tool_calls
+                        ak = dict(getattr(m, "additional_kwargs", None) or {})
+                        ak.pop("tool_calls", None)
+                        m = m.model_copy(update={"additional_kwargs": ak})
+                    except Exception:
+                        pass
+                    sanitized.append(m)
+                else:
+                    # Pure tool_call message with no responses — drop entirely
+                    logger.debug("Dropping orphaned tool_call message: %s",
+                                 [t.get("id", "?") for t in tc])
+            else:
+                sanitized.append(m)
+        else:
+            sanitized.append(m)
+    return sanitized
+
+
 # ── Graph nodes ───────────────────────────────────────────────────────────────
 
 async def chatbot_node(state: GraphState, config: RunnableConfig):
@@ -262,6 +316,18 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
 
     full_system = "\n\n".join(system_parts)
     filtered = [m for m in messages if not isinstance(m, SystemMessage)]
+
+    # Sanitize: strip orphaned tool_calls that have no matching ToolMessage.
+    # This prevents OpenAI 400 errors when a previous turn was interrupted.
+    filtered = _sanitize_tool_calls(filtered)
+
+    # Extra safety: log what we're about to send
+    for i, m in enumerate(filtered):
+        tc = getattr(m, 'tool_calls', None) or []
+        ak_tc = (getattr(m, 'additional_kwargs', None) or {}).get('tool_calls', [])
+        if tc or ak_tc:
+            logger.info("msg[%d] type=%s tool_calls=%d ak_tool_calls=%d",
+                        i, type(m).__name__, len(tc), len(ak_tc))
 
     # Deterministic canvas enforcement: inject a reminder right before the
     # last user message so the LLM sees the authoritative canvas state
