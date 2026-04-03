@@ -319,29 +319,54 @@ async def chatbot_node(state: GraphState, config: RunnableConfig):
 
     # Sanitize: strip orphaned tool_calls that have no matching ToolMessage.
     # This prevents OpenAI 400 errors when a previous turn was interrupted.
-    filtered = _sanitize_tool_calls(filtered)
-
-    # Extra safety: log what we're about to send
+    logger.info("PRE-SANITIZE: %d messages", len(filtered))
     for i, m in enumerate(filtered):
         tc = getattr(m, 'tool_calls', None) or []
         ak_tc = (getattr(m, 'additional_kwargs', None) or {}).get('tool_calls', [])
-        if tc or ak_tc:
-            logger.info("msg[%d] type=%s tool_calls=%d ak_tool_calls=%d",
-                        i, type(m).__name__, len(tc), len(ak_tc))
+        tc_ids = [t.get("id", "?") for t in tc] if tc else []
+        tool_call_id = getattr(m, 'tool_call_id', None)
+        logger.info("  [%d] type=%-15s tc_ids=%-40s tool_call_id=%s content=%s",
+                     i, type(m).__name__, tc_ids or "",
+                     tool_call_id or "",
+                     repr((getattr(m, 'content', '') or '')[:80]))
+
+    filtered = _sanitize_tool_calls(filtered)
+
+    logger.info("POST-SANITIZE: %d messages", len(filtered))
+    for i, m in enumerate(filtered):
+        tc = getattr(m, 'tool_calls', None) or []
+        tc_ids = [t.get("id", "?") for t in tc] if tc else []
+        tool_call_id = getattr(m, 'tool_call_id', None)
+        logger.info("  [%d] type=%-15s tc_ids=%-40s tool_call_id=%s",
+                     i, type(m).__name__, tc_ids or "", tool_call_id or "")
 
     # Deterministic canvas enforcement: inject a reminder right before the
-    # last user message so the LLM sees the authoritative canvas state
+    # last HumanMessage so the LLM sees the authoritative canvas state
     # immediately before deciding what to do.  Full conversation history
     # is preserved — only a synthetic SystemMessage is inserted.
+    # IMPORTANT: never insert between an AIMessage(tool_calls) and its
+    # ToolMessage response — OpenAI requires them to be adjacent.
     canvas_reminder = SystemMessage(content=(
         f"[CANVAS STATE — AUTHORITATIVE, OVERRIDES YOUR MEMORY]\n{canvas_ctx}\n"
         "If the user asks for something NOT listed above, you MUST call emit_ui to create it. "
         "Do NOT say 'already displayed' unless the surface_id appears in the list above."
     ))
-    # Insert reminder right before the last message
-    if len(filtered) > 1:
-        final_messages = [SystemMessage(content=full_system)] + filtered[:-1] + [canvas_reminder, filtered[-1]]
+    # Find the index of the last HumanMessage to insert before it
+    last_human_idx = None
+    for i in range(len(filtered) - 1, -1, -1):
+        if isinstance(filtered[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx is not None and last_human_idx > 0:
+        final_messages = (
+            [SystemMessage(content=full_system)]
+            + filtered[:last_human_idx]
+            + [canvas_reminder]
+            + filtered[last_human_idx:]
+        )
     else:
+        # No human message or it's the first — put reminder at the start
         final_messages = [SystemMessage(content=full_system), canvas_reminder] + filtered
 
     # Merge CopilotKit frontend actions into tools for this invocation
