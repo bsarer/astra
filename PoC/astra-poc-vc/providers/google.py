@@ -36,6 +36,9 @@ class GoogleEmailProvider(EmailProvider):
     async def mark_read(self, email_id: str) -> bool:
         raise NotImplementedError("Google Gmail provider not yet implemented")
 
+    async def download_attachment(self, email_id: str, attachment_name: str) -> tuple[str, bytes]:
+        raise NotImplementedError("Google Gmail provider not yet implemented")
+
 
 class GoogleCalendarProvider(CalendarProvider):
     """Google Calendar API provider."""

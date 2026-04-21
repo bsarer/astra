@@ -7,6 +7,14 @@ from typing import Optional
 
 
 @dataclass
+class EmailAttachment:
+    filename: str
+    content_type: str = "application/octet-stream"
+    size_bytes: int = 0
+    content_base64: Optional[str] = None
+
+
+@dataclass
 class Email:
     id: str
     from_addr: str
@@ -18,6 +26,7 @@ class Email:
     read: bool = False
     cc: list[str] = field(default_factory=list)
     bcc: list[str] = field(default_factory=list)
+    attachments: list[EmailAttachment] = field(default_factory=list)
 
 
 @dataclass
@@ -55,6 +64,10 @@ class EmailProvider(ABC):
 
     @abstractmethod
     async def mark_read(self, email_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    async def download_attachment(self, email_id: str, attachment_name: str) -> tuple[str, bytes]:
         ...
 
 

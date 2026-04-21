@@ -209,6 +209,7 @@ impl DockerManager {
             "--name", &self.config.container_name,
             "--security-opt", "no-new-privileges",
             "--cap-drop=ALL",
+            "--add-host", "host.docker.internal:host-gateway",
             "-p", &port_mapping,
         ]);
 

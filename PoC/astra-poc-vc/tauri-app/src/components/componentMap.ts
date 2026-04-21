@@ -1,14 +1,30 @@
+import type { ComponentType } from "react";
 import {
-  AIOSText, AIOSButton, AIOSCard, AIOSRow, AIOSColumn,
-  AIOSDivider, AIOSTabs, AIOSImage, AIOSIcon, AIOSList,
-  AIOSStockTicker, AIOSStockAlert, AIOSEmailRow,
-  AIOSMetricCard, AIOSSparklineChart, AIOSCalendarEvent,
-  AIOSClock, AIOSStockWatchlist,
+  AIOSText,
+  AIOSButton,
+  AIOSCard,
+  AIOSRow,
+  AIOSColumn,
+  AIOSDivider,
+  AIOSTabs,
+  AIOSImage,
+  AIOSIcon,
+  AIOSList,
+  AIOSStockTicker,
+  AIOSStockAlert,
+  AIOSEmailRow,
+  AIOSMetricCard,
+  AIOSSparklineChart,
+  AIOSCalendarEvent,
+  AIOSClock,
+  AIOSStockWatchlist,
+  AIOSFileExplorer,
+  AIOSFileViewer,
+  AIOSFileRow,
   AIOSFallback,
 } from "./aios";
 
-export const componentMap: Record<string, React.ComponentType<any>> = {
-  // Standard catalog
+export const componentMap: Record<string, ComponentType<any>> = {
   Text: AIOSText,
   Button: AIOSButton,
   Card: AIOSCard,
@@ -28,6 +44,9 @@ export const componentMap: Record<string, React.ComponentType<any>> = {
   SparklineChart: AIOSSparklineChart,
   CalendarEvent: AIOSCalendarEvent,
   Clock: AIOSClock,
+  FileExplorer: AIOSFileExplorer,
+  FileViewer: AIOSFileViewer,
+  FileRow: AIOSFileRow,
 };
 
 export const fallbackComponent = AIOSFallback;

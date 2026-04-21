@@ -13,7 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from typing import Optional
 
-from .base import Email, EmailProvider
+from .base import Email, EmailAttachment, EmailProvider
 
 
 class ZohoEmailProvider(EmailProvider):
@@ -33,6 +33,35 @@ class ZohoEmailProvider(EmailProvider):
         mail = imaplib.IMAP4_SSL(self._imap_server, self._imap_port)
         mail.login(self._email, self._password)
         return mail
+
+    def _extract_message_content(self, msg) -> tuple[str, list[EmailAttachment]]:
+        body = ""
+        attachments: list[EmailAttachment] = []
+
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_disposition = (part.get("Content-Disposition") or "").lower()
+                filename = part.get_filename()
+                if filename:
+                    payload = part.get_payload(decode=True) or b""
+                    attachments.append(
+                        EmailAttachment(
+                            filename=filename,
+                            content_type=part.get_content_type(),
+                            size_bytes=len(payload),
+                        )
+                    )
+                    continue
+                if "attachment" in content_disposition:
+                    continue
+                if part.get_content_type() == "text/plain" and not body:
+                    payload = part.get_payload(decode=True) or b""
+                    body = payload.decode("utf-8", errors="ignore")
+        else:
+            payload = msg.get_payload(decode=True) or b""
+            body = payload.decode("utf-8", errors="ignore")
+
+        return body, attachments
 
     async def list_emails(self, limit: int = 20, label: str | None = None) -> list[Email]:
         """List recent emails from inbox."""
@@ -74,15 +103,7 @@ class ZohoEmailProvider(EmailProvider):
                 except:
                     date = datetime.now()
                 
-                # Get body
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                            break
-                else:
-                    body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+                body, attachments = self._extract_message_content(msg)
                 
                 emails.append(Email(
                     id=email_id.decode(),
@@ -93,6 +114,7 @@ class ZohoEmailProvider(EmailProvider):
                     date=date,
                     labels=[folder.lower()],
                     read=True,  # IMAP doesn't easily expose unread status
+                    attachments=attachments,
                 ))
             
             mail.close()
@@ -126,14 +148,7 @@ class ZohoEmailProvider(EmailProvider):
             except:
                 date = datetime.now()
             
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                        break
-            else:
-                body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            body, attachments = self._extract_message_content(msg)
             
             mail.close()
             mail.logout()
@@ -147,6 +162,7 @@ class ZohoEmailProvider(EmailProvider):
                 date=date,
                 labels=["inbox"],
                 read=True,
+                attachments=attachments,
             )
             
         except Exception as e:
@@ -205,3 +221,29 @@ class ZohoEmailProvider(EmailProvider):
             return True
         except:
             return False
+
+    async def download_attachment(self, email_id: str, attachment_name: str) -> tuple[str, bytes]:
+        try:
+            mail = self._connect_imap()
+            mail.select("INBOX")
+            _, msg_data = mail.fetch(email_id.encode(), "(RFC822)")
+            if not msg_data or not msg_data[0]:
+                raise FileNotFoundError(f"Email {email_id} not found")
+
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+            for part in msg.walk():
+                filename = part.get_filename()
+                if filename == attachment_name:
+                    payload = part.get_payload(decode=True) or b""
+                    mail.close()
+                    mail.logout()
+                    return filename, payload
+
+            mail.close()
+            mail.logout()
+            raise FileNotFoundError(f"Attachment {attachment_name} not found on email {email_id}")
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            raise Exception(f"Failed to download attachment {attachment_name}: {e}")

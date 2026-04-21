@@ -426,13 +426,17 @@ Indexes user files for semantic search and domain-aware retrieval.
 │  │  ├─ Returns: filename, type, size, domain tags            │  │
 │  │  └─ Use case: "What files do I have?"                     │  │
 │  │                                                             │  │
-│  │  read_user_file(filename)                                  │  │
-│  │  ├─ Returns: full file content                            │  │
-│  │  └─ Use case: "Show me the Acme pricing"                  │  │
+│  │  open_user_file(filename)                                  │  │
+│  │  ├─ Returns: viewer metadata + raw file URL              │  │
+│  │  └─ Use case: "Open the Acme pricing file"               │  │
 │  │                                                             │  │
 │  │  search_user_files(query)                                  │  │
 │  │  ├─ Semantic search + domain filtering                    │  │
 │  │  └─ Use case: "Find docs about NovaTech"                  │  │
+│  │                                                             │  │
+│  │  categorize_user_files(group_by)                           │  │
+│  │  ├─ Organizes files into folders by type/name/meaning     │  │
+│  │  └─ Use case: "Categorize my files by meaning"            │  │
 │  │                                                             │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                   │
@@ -569,7 +573,7 @@ PoC/astra-poc-vc/
 | Qdrant Integration | ✅ Done | With in-memory fallback |
 | Domain Router | ✅ Done | 6 domains, bridging logic |
 | Memory Manager | ✅ Done | Store, retrieve, file index |
-| File Tools | ✅ Done | list, read, search |
+| File Tools | ✅ Done | list, open, search, organize |
 | Memory Tools | ✅ Done | store, search, workflow tools |
 | Workflow Engine | ✅ Done | Pattern detection, proposals |
 | Agent Integration | ✅ Done | Context injection, extraction |

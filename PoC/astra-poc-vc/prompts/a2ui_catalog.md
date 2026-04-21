@@ -34,6 +34,8 @@ You generate UI by calling the `emit_ui` tool with a `surface_id` and a flat lis
 | SparklineChart | values (list of numbers), color (green/red/blue/cyan), height |
 | CalendarEvent | time, title, location, attendees |
 | Clock | timezone (e.g. "America/New_York", optional — defaults to local), format ("12h"/"24h"), showDate (bool), label |
+| FileExplorer | title, subtitle, query, category, timeframe, directory, sort |
+| FileViewer | path or filename, optional preview_type/raw_url/viewer metadata; renders the raw file, not a preview summary |
 
 #### Example: Mike's Dashboard (use this when user says "show me my dashboard")
 Call `emit_ui` immediately with this structure — no data fetching needed, render from persona context:
@@ -94,51 +96,68 @@ emit_ui(
 - Always call `emit_ui` — never output raw HTML
 
 #### Example: File List Surface
-When the user asks "show me my files" or action "show_files":
-1. Call `list_user_files()` — returns JSON with a `files` array, each with `filename`, `type`, `size_kb`, `domains`
-2. Build one Row child per file, then call `emit_ui`. Use the actual filenames from the tool result.
+When the user asks "show me my files", "show me files", or action "show_files":
+1. Call `list_user_files()` for the root `Files` directory unless the user explicitly names a folder
+2. It returns JSON with a `files` array, each with `filename`, `type`, `size_kb`, `domains`
+3. Prefer a single `FileExplorer` component instead of manually building rows.
 
 ```json
 emit_ui(
   surface_id="my-files",
   components=[
-    {"id": "root", "type": "Card", "props": {"variant": "glass"}, "children": ["title", "list"]},
-    {"id": "title", "type": "Text", "props": {"text": "📁 My Files (5)", "variant": "title", "weight": "bold"}, "children": []},
-    {"id": "list", "type": "Column", "props": {"gap": "8px"}, "children": ["f1", "f2", "f3", "f4", "f5"]},
-    {"id": "f1", "type": "Row", "props": {"gap": "10px", "align": "center"}, "children": ["f1-icon", "f1-info", "f1-btn"]},
-    {"id": "f1-icon", "type": "Icon", "props": {"name": "file", "size": 16, "color": "#94a3b8"}, "children": []},
-    {"id": "f1-info", "type": "Column", "props": {"gap": "2px"}, "children": ["f1-name", "f1-meta"]},
-    {"id": "f1-name", "type": "Text", "props": {"text": "Q1_Pipeline_Report.md", "variant": "body", "weight": "semibold"}, "children": []},
-    {"id": "f1-meta", "type": "Text", "props": {"text": "sales · 4.2 KB", "variant": "muted"}, "children": []},
-    {"id": "f1-btn", "type": "Button", "props": {"label": "Open", "action": "read_file", "payload": {"filename": "Q1_Pipeline_Report.md"}, "variant": "ghost"}, "children": []}
+    {"id": "root", "type": "FileExplorer", "props": {"title": "My Files", "subtitle": "Browse your root Files directory and open any file you need."}, "children": []}
   ],
   grid={"w": 6, "h": 7}
 )
 ```
-Repeat the f1/f2/f3... pattern for each file returned. Always include an "Open" button with `action: "read_file"` and `payload: {"filename": "..."}`.
+Use the exact type name `FileExplorer`. Do not use `AIOSFileExplorer` or lowercase variants unless the frontend explicitly aliases them.
+Use props to make the widget reflect the user's request. Examples:
+- Open a folder: `{"directory": "Downloads"}`
+- Search by intent: `{"query": "pricing"}`
+- Show only documents: `{"category": "documents"}`
+- Group by file type: `{"sort": "type-asc"}`
+- Never say files were changed unless you first called a file mutation tool.
+
+When the user asks to organize, categorize, or separate files by type, name, or meaning:
+1. Call `categorize_user_files(...)`
+2. Then render a refreshed `FileExplorer`, usually pointed at the root or the chosen destination folder
+3. Mention the grouping mode in the widget title or subtitle when helpful
+
+Examples:
+- Categorize by type: call `categorize_user_files(group_by="type")`
+- Separate by meaning: call `categorize_user_files(group_by="meaning")`
+- Preview by name first: call `categorize_user_files(group_by="name", dry_run=true)`
 
 #### Example: File Content Surface
-When the user asks to read or summarize a file, or clicks "Open" (action: "read_file"):
-1. Call `read_user_file(filename)` to get the content
-2. Extract 3-5 key bullet points from the content
-3. Render with `emit_ui` surface_id="file-content":
+When the user asks to open a specific file, read a named file, show a PDF, or preview an image:
+1. Call `open_user_file(filename)` to resolve the file path and raw URL
+2. Render a `FileViewer` component with the returned `path`
+3. Use `surface_id="file-content"`:
 
 ```json
 emit_ui(
   surface_id="file-content",
   components=[
-    {"id": "root", "type": "Card", "props": {"variant": "glass"}, "children": ["title", "divider", "points"]},
-    {"id": "title", "type": "Text", "props": {"text": "📄 Q1 Pipeline Report", "variant": "title", "weight": "bold"}, "children": []},
-    {"id": "divider", "type": "Divider", "props": {}, "children": []},
-    {"id": "points", "type": "Column", "props": {"gap": "8px"}, "children": ["p1", "p2", "p3"]},
-    {"id": "p1", "type": "Text", "props": {"text": "• Acme Corp: $450K — renewal in Q2", "variant": "body"}, "children": []},
-    {"id": "p2", "type": "Text", "props": {"text": "• BluePeak: $280K — at risk, needs exec call", "variant": "body"}, "children": []},
-    {"id": "p3", "type": "Text", "props": {"text": "• NovaTech: $180K — demo scheduled with Dave Wilson", "variant": "body"}, "children": []}
+    {
+      "id": "root",
+      "type": "FileViewer",
+      "props": {
+        "path": "Sales & Pipeline/Q1_Pipeline_Report.md",
+        "filename": "Q1_Pipeline_Report.md",
+        "preview_type": "text",
+        "raw_url": "/api/files/Sales%20%26%20Pipeline/Q1_Pipeline_Report.md/raw",
+        "viewer": {
+          "kind": "text",
+          "raw_url": "/api/files/Sales%20%26%20Pipeline/Q1_Pipeline_Report.md/raw"
+        }
+      },
+      "children": []
+    }
   ],
-  grid={"w": 6, "h": 5}
+  grid={"w": 8, "h": 7}
 )
 ```
-Replace the bullet points with actual key facts from the file content.
+This component loads the full raw file. Do not replace it with preview bullets or summaries.
 
 #### Example: File Search Surface
 When the user asks "find files about X" or "what do I have on pricing":

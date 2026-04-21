@@ -1,5 +1,6 @@
 """Mock providers that read from persona JSON files."""
 
+import base64
 import json
 import os
 import uuid
@@ -7,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .base import Email, EmailProvider, CalendarEvent, CalendarProvider
+from .base import Email, EmailAttachment, EmailProvider, CalendarEvent, CalendarProvider
 
 
 def _parse_dt(s: str) -> datetime:
@@ -49,6 +50,15 @@ class MockEmailProvider(EmailProvider):
         raw = json.loads(self._path.read_text())
         emails = []
         for e in raw:
+            attachments = [
+                EmailAttachment(
+                    filename=attachment.get("filename", "attachment.bin"),
+                    content_type=attachment.get("content_type", "application/octet-stream"),
+                    size_bytes=int(attachment.get("size_bytes", 0)),
+                    content_base64=attachment.get("content_base64"),
+                )
+                for attachment in e.get("attachments", [])
+            ]
             emails.append(Email(
                 id=str(e["id"]),
                 from_addr=e["from"],
@@ -58,6 +68,7 @@ class MockEmailProvider(EmailProvider):
                 date=_parse_dt(e["date"]),
                 labels=e.get("labels", []),
                 read=e.get("read", False),
+                attachments=attachments,
             ))
         return sorted(emails, key=lambda x: x.date, reverse=True)
 
@@ -68,6 +79,15 @@ class MockEmailProvider(EmailProvider):
                 "id": e.id, "from": e.from_addr, "to": e.to_addr,
                 "subject": e.subject, "body": e.body,
                 "date": e.date.isoformat(), "labels": e.labels, "read": e.read,
+                "attachments": [
+                    {
+                        "filename": attachment.filename,
+                        "content_type": attachment.content_type,
+                        "size_bytes": attachment.size_bytes,
+                        "content_base64": attachment.content_base64,
+                    }
+                    for attachment in e.attachments
+                ],
             })
         self._path.write_text(json.dumps(data, indent=2))
 
@@ -111,6 +131,19 @@ class MockEmailProvider(EmailProvider):
             self._save()
             return True
         return False
+
+    async def download_attachment(self, email_id: str, attachment_name: str) -> tuple[str, bytes]:
+        email = await self.get_email(email_id)
+        if not email:
+            raise FileNotFoundError(f"Email {email_id} not found")
+
+        for attachment in email.attachments:
+            if attachment.filename == attachment_name:
+                if attachment.content_base64:
+                    return attachment.filename, base64.b64decode(attachment.content_base64)
+                return attachment.filename, b""
+
+        raise FileNotFoundError(f"Attachment {attachment_name} not found on email {email_id}")
 
 
 class MockCalendarProvider(CalendarProvider):

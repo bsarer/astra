@@ -17,3 +17,6 @@ export { AIOSSparklineChart } from "./AIOSSparklineChart";
 export { AIOSCalendarEvent } from "./AIOSCalendarEvent";
 export { AIOSClock } from "./AIOSClock";
 export { AIOSStockWatchlist } from "./AIOSStockWatchlist";
+export { AIOSFileExplorer } from "./AIOSFileExplorer";
+export { AIOSFileViewer } from "./AIOSFileViewer";
+export { AIOSFileRow } from "./AIOSFileRow";

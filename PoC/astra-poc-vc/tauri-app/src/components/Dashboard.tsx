@@ -20,6 +20,11 @@ interface WindowData {
   minimized: boolean;
 }
 
+interface FileActionPayload {
+  path?: string;
+  filename?: string;
+}
+
 // Map widget button actions to chat messages
 const ACTION_MESSAGES: Record<string, string> = {
   show_inbox: "show me my inbox",
@@ -37,6 +42,13 @@ function surfaceTitle(id: string): string {
 // Grid constants
 const GRID_COLS = 12;
 const ROW_HEIGHT = 60;
+
+function encodeFilePath(path: string) {
+  return path
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
 
 export function Dashboard() {
   const [windowData, setWindowData] = useState<Map<string, WindowData>>(new Map());
@@ -60,8 +72,19 @@ export function Dashboard() {
     return () => window.removeEventListener("resize", measure);
   }, []);
 
+  const openFile = useCallback((payload?: FileActionPayload) => {
+    const path = payload?.path?.trim();
+    if (!path) return;
+
+    window.open(`/api/files/${encodeFilePath(path)}/raw`, "_blank", "noopener,noreferrer");
+  }, []);
+
   const handleAction = useCallback((action: string, payload?: Record<string, any>) => {
     console.log("[Dashboard] Action:", action, payload);
+    if (action === "open_file") {
+      openFile(payload);
+      return;
+    }
     let msg = ACTION_MESSAGES[action];
     if (!msg) return;
     if (action === "read_file" && payload?.filename) {
@@ -71,7 +94,7 @@ export function Dashboard() {
     // so the agent can re-create it
     closedWindows.current.clear();
     appendMessage({ id: crypto.randomUUID(), role: "user", content: msg } as any);
-  }, [appendMessage]);
+  }, [appendMessage, openFile]);
 
   const removeWindow = useCallback((id: string) => {
     closedWindows.current.add(id);

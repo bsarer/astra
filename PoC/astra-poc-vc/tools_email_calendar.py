@@ -1,12 +1,12 @@
 """LangChain tools for email and calendar — backed by the provider layer."""
 
 import json
-import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional
 from langchain_core.tools import tool
 
 from providers.factory import get_email_provider, get_calendar_provider
+from tools_files import save_binary_file_data
 
 
 @tool
@@ -20,6 +20,8 @@ async def list_emails(limit: int = 10, label: Optional[str] = None) -> str:
             "id": e.id, "from": e.from_addr, "to": e.to_addr,
             "subject": e.subject, "date": e.date.isoformat(),
             "read": e.read, "labels": e.labels,
+            "attachment_count": len(e.attachments),
+            "attachments": [attachment.filename for attachment in e.attachments],
             "preview": e.body[:120] + "..." if len(e.body) > 120 else e.body,
         }
         for e in emails
@@ -37,6 +39,14 @@ async def get_email(email_id: str) -> str:
         "id": email.id, "from": email.from_addr, "to": email.to_addr,
         "subject": email.subject, "body": email.body,
         "date": email.date.isoformat(), "labels": email.labels, "read": email.read,
+        "attachments": [
+            {
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size_bytes": attachment.size_bytes,
+            }
+            for attachment in email.attachments
+        ],
     }, indent=2)
 
 
@@ -49,9 +59,34 @@ async def search_emails(query: str) -> str:
         {
             "id": e.id, "from": e.from_addr, "subject": e.subject,
             "date": e.date.isoformat(), "preview": e.body[:100],
+            "attachment_count": len(e.attachments),
         }
         for e in results[:10]
     ], indent=2)
+
+
+@tool
+async def save_email_attachment(
+    email_id: str,
+    attachment_name: str,
+    destination_subdirectory: str = "Downloads",
+) -> str:
+    """Save an attachment from an email into Mike's sandboxed files directory.
+
+    Example: save_email_attachment(email_id="123", attachment_name="quote.pdf", destination_subdirectory="Downloads")
+    """
+    provider = get_email_provider()
+    filename, content = await provider.download_attachment(email_id, attachment_name)
+    saved = save_binary_file_data(filename, content, destination_subdirectory=destination_subdirectory)
+    return json.dumps(
+        {
+            "email_id": email_id,
+            "attachment_name": attachment_name,
+            "saved_to": saved["path"],
+            "file": saved,
+        },
+        indent=2,
+    )
 
 
 @tool
@@ -118,6 +153,6 @@ async def create_calendar_event(
 
 # All email/calendar tools for easy import
 email_calendar_tools = [
-    list_emails, get_email, search_emails, send_email,
+    list_emails, get_email, search_emails, save_email_attachment, send_email,
     list_calendar_events, get_calendar_event, create_calendar_event,
 ]

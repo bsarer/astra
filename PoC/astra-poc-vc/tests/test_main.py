@@ -2,6 +2,7 @@
 
 import sys
 import os
+import base64
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import json
@@ -37,6 +38,183 @@ class TestHealthCheck:
         assert resp.json()["status"] == "initializing"
         # Restore
         main_module._ready = True
+
+
+class TestFileApi:
+    @pytest.mark.anyio
+    async def test_lists_and_previews_files(self, monkeypatch, tmp_path):
+        pricing = tmp_path / "Pricing_Brief.md"
+        pricing.write_text("# Pricing\nAcme pricing and discount summary.", encoding="utf-8")
+        (tmp_path / "Images").mkdir()
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            list_resp = await client.get("/api/files", params={"query": "pricing"})
+            assert list_resp.status_code == 200
+            payload = list_resp.json()
+            assert payload["file_count"] == 1
+            assert payload["count"] == payload["file_count"] + payload["folder_count"]
+            assert payload["files"][0]["filename"] == "Pricing_Brief.md"
+            assert any(folder["path"] == "Images" for folder in payload["folders"])
+
+            preview_resp = await client.get("/api/files/Pricing_Brief.md/preview")
+            assert preview_resp.status_code == 200
+            preview = preview_resp.json()
+            assert preview["summary_card"]["points"]
+            assert preview["path"] == "Pricing_Brief.md"
+
+            open_resp = await client.get("/api/files/Pricing_Brief.md/open")
+            assert open_resp.status_code == 200
+            opened = open_resp.json()
+            assert opened["viewer"]["kind"] == "text"
+            assert "document file" in opened["content"].lower()
+            assert "open the raw file" in opened["content"].lower()
+
+    @pytest.mark.anyio
+    async def test_rename_move_and_delete_file(self, monkeypatch, tmp_path):
+        file_path = tmp_path / "Draft.md"
+        file_path.write_text("# Draft\nQuarterly board notes.", encoding="utf-8")
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            rename_resp = await client.post(
+                "/api/files/rename",
+                json={"path": "Draft.md", "new_name": "Renamed.md"},
+            )
+            assert rename_resp.status_code == 200
+            assert rename_resp.json()["filename"] == "Renamed.md"
+
+            move_resp = await client.post(
+                "/api/files/move",
+                json={"path": "Renamed.md", "destination_subdirectory": "archive"},
+            )
+            assert move_resp.status_code == 200
+            assert move_resp.json()["path"] == "archive/Renamed.md"
+
+            delete_resp = await client.post(
+                "/api/files/delete",
+                json={"path": "archive/Renamed.md"},
+            )
+            assert delete_resp.status_code == 200
+            assert delete_resp.json()["deleted"] is True
+
+    @pytest.mark.anyio
+    async def test_delete_many_files_api(self, monkeypatch, tmp_path):
+        (tmp_path / "A.md").write_text("# A", encoding="utf-8")
+        (tmp_path / "B.md").write_text("# B", encoding="utf-8")
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            delete_resp = await client.post(
+                "/api/files/delete-many",
+                json={"paths": ["A.md", "B.md"]},
+            )
+            assert delete_resp.status_code == 200
+            payload = delete_resp.json()
+            assert payload["deleted_count"] == 2
+            assert payload["error_count"] == 0
+            assert not (tmp_path / "A.md").exists()
+            assert not (tmp_path / "B.md").exists()
+
+    @pytest.mark.anyio
+    async def test_create_folder_and_browse_subdirectory(self, monkeypatch, tmp_path):
+        nested = tmp_path / "Notes"
+        nested.mkdir()
+        (nested / "Brief.md").write_text("# Brief\nFolder scoped note.", encoding="utf-8")
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            create_resp = await client.post(
+                "/api/files/folder",
+                json={"name": "Archive", "parent_subdirectory": ""},
+            )
+            assert create_resp.status_code == 200
+            assert create_resp.json()["path"] == "Archive"
+
+            list_resp = await client.get("/api/files", params={"subdirectory": "Notes"})
+            assert list_resp.status_code == 200
+            payload = list_resp.json()
+            assert payload["current_directory"] == "Notes"
+            assert payload["files"][0]["filename"] == "Brief.md"
+            assert payload["breadcrumbs"][-1]["path"] == "Notes"
+            assert payload["count"] == payload["file_count"] + payload["folder_count"]
+
+    @pytest.mark.anyio
+    async def test_delete_folder_api(self, monkeypatch, tmp_path):
+        archive = tmp_path / "Archive"
+        archive.mkdir()
+        (archive / "Brief.md").write_text("# Brief\nFolder scoped note.", encoding="utf-8")
+        (archive / "Sub").mkdir()
+        (archive / "Sub" / "Draft.txt").write_text("nested", encoding="utf-8")
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            delete_resp = await client.post(
+                "/api/files/folder/delete",
+                json={"path": "Archive", "recursive": True},
+            )
+            assert delete_resp.status_code == 200
+            payload = delete_resp.json()
+            assert payload["deleted"] is True
+            assert payload["path"] == "Archive"
+            assert payload["deleted_file_count"] == 2
+            assert not (tmp_path / "Archive").exists()
+
+    @pytest.mark.anyio
+    async def test_save_email_attachment_into_files(self, monkeypatch, tmp_path):
+        import providers.factory as provider_factory
+
+        attachment_bytes = b"quarterly-report"
+        emails_path = tmp_path / "emails.json"
+        emails_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "mail-1",
+                        "from": "ops@example.com",
+                        "to": "mike@example.com",
+                        "subject": "Quarterly report",
+                        "body": "See attached report.",
+                        "date": "2026-04-03T09:00:00",
+                        "labels": ["inbox"],
+                        "read": False,
+                        "attachments": [
+                            {
+                                "filename": "Quarterly_Report.pdf",
+                                "content_type": "application/pdf",
+                                "size_bytes": len(attachment_bytes),
+                                "content_base64": base64.b64encode(attachment_bytes).decode("ascii"),
+                            }
+                        ],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DATA_PROVIDER", "mock")
+        monkeypatch.delenv("MIKE_EMAIL_PROVIDER", raising=False)
+        monkeypatch.setattr(provider_factory, "_ROOT", tmp_path)
+        monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path / "files"))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            save_resp = await client.post(
+                "/api/emails/mail-1/attachments/save",
+                json={"attachment_name": "Quarterly_Report.pdf", "destination_subdirectory": "Downloads"},
+            )
+            assert save_resp.status_code == 200
+            payload = save_resp.json()
+            assert payload["saved_to"] == "Downloads/Quarterly_Report.pdf"
+
+            preview_resp = await client.get("/api/files/Downloads/Quarterly_Report.pdf/preview")
+            assert preview_resp.status_code == 200
+            preview = preview_resp.json()
+            assert preview["filename"] == "Quarterly_Report.pdf"
 
 
 # ---------------------------------------------------------------------------

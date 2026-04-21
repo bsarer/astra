@@ -8,8 +8,8 @@ import uuid as _uuid
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -18,6 +18,21 @@ from pydantic import BaseModel
 from agent import get_agent_response_stream, graph
 from agent import _canvas_state
 from session import SessionManager
+from tools_files import (
+    build_file_listing_payload,
+    create_folder_data,
+    delete_user_folder_data,
+    _resolve_base,
+    _safe_relative_path,
+    delete_multiple_files_data,
+    delete_user_file_data,
+    list_folder_records,
+    move_user_file_data,
+    open_user_file_data,
+    preview_user_file_data,
+    rename_user_file_data,
+)
+from tools_email_calendar import save_email_attachment as save_email_attachment_tool
 from copilotkit import LangGraphAGUIAgent
 from ag_ui.core.types import RunAgentInput
 from ag_ui.encoder import EventEncoder
@@ -216,12 +231,179 @@ async def stocks_live_sse():
 class SurfaceCloseRequest(BaseModel):
     surface_id: str
 
+
+class FileRenameRequest(BaseModel):
+    path: str
+    new_name: str
+
+
+class FileMoveRequest(BaseModel):
+    path: str
+    destination_subdirectory: str
+
+
+class FileDeleteRequest(BaseModel):
+    path: str
+
+
+class FileDeleteManyRequest(BaseModel):
+    paths: list[str]
+
+
+class FileCreateFolderRequest(BaseModel):
+    name: str
+    parent_subdirectory: str = ""
+
+
+class FileDeleteFolderRequest(BaseModel):
+    path: str
+    recursive: bool = True
+
+
+class EmailAttachmentSaveRequest(BaseModel):
+    attachment_name: str
+    destination_subdirectory: str = "Downloads"
+
+
 @app.post("/api/surface/close")
 async def surface_close(req: SurfaceCloseRequest):
     """Remove a surface from the agent's canvas state when user closes a widget."""
     removed = _canvas_state.pop(req.surface_id, None)
     logger.debug("Surface closed: %s (was_tracked=%s)", req.surface_id, removed is not None)
     return {"ok": True, "removed": removed is not None}
+
+
+@app.get("/api/files")
+async def list_files_api(
+    query: str = "",
+    category: str = "all",
+    timeframe: str = "",
+    subdirectory: str = "",
+):
+    from tools_files import _collect_file_records
+
+    try:
+        files = _collect_file_records(
+            subdirectory=subdirectory,
+            query=query,
+            category=category,
+            timeframe=timeframe or query,
+            recursive=bool(query.strip()),
+        )
+        folders = list_folder_records(subdirectory=subdirectory)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return build_file_listing_payload(
+        files=files,
+        folders=folders,
+        subdirectory=subdirectory,
+        query=query,
+        category=category,
+        timeframe=timeframe or query,
+    )
+
+
+@app.get("/api/files/{file_path:path}/preview")
+async def file_preview_api(file_path: str):
+    try:
+        return preview_user_file_data(file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}") from exc
+
+
+@app.get("/api/files/{file_path:path}/open")
+async def file_open_api(file_path: str):
+    try:
+        return open_user_file_data(file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}") from exc
+
+
+@app.get("/api/files/{file_path:path}/raw")
+async def file_raw_api(file_path: str):
+    base = _resolve_base()
+    try:
+        path = _safe_relative_path(base, file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    return FileResponse(path)
+
+
+@app.post("/api/files/rename")
+async def file_rename_api(req: FileRenameRequest):
+    try:
+        return rename_user_file_data(req.path, req.new_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {req.path}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/files/move")
+async def file_move_api(req: FileMoveRequest):
+    try:
+        return move_user_file_data(req.path, req.destination_subdirectory)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {req.path}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/files/folder")
+async def file_create_folder_api(req: FileCreateFolderRequest):
+    try:
+        return create_folder_data(req.name, req.parent_subdirectory)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/files/folder/delete")
+async def file_delete_folder_api(req: FileDeleteFolderRequest):
+    try:
+        return delete_user_folder_data(req.path, recursive=req.recursive)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Folder not found: {req.path}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/files/delete")
+async def file_delete_api(req: FileDeleteRequest):
+    try:
+        return delete_user_file_data(req.path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {req.path}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/files/delete-many")
+async def file_delete_many_api(req: FileDeleteManyRequest):
+    try:
+        return delete_multiple_files_data(req.paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+@app.post("/api/emails/{email_id}/attachments/save")
+async def email_attachment_save_api(email_id: str, req: EmailAttachmentSaveRequest):
+    try:
+        result = await save_email_attachment_tool.ainvoke(
+            {
+                "email_id": email_id,
+                "attachment_name": req.attachment_name,
+                "destination_subdirectory": req.destination_subdirectory,
+            }
+        )
+        return json.loads(result)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────
