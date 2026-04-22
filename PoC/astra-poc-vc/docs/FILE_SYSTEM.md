@@ -11,7 +11,9 @@ At a high level, it provides:
 - A safe root directory for user files
 - File and folder listing
 - Search by topic, file type, and timeframe
-- Open and preview flows for text, PDFs, images, and videos
+- Open and preview flows for Markdown, PDFs, and images
+- Structured document creation for Markdown and PDF outputs
+- Markdown and PDF merge flows, including logical synthesis for Markdown and cover-page merge for PDFs
 - File management operations such as rename, move, delete, and folder creation
 - File organization by type, extension, filename meaning, alphabetical bucket, and semantic meaning/domain
 
@@ -37,13 +39,9 @@ The backend protects the sandbox using safe path resolution. Any path that tries
 
 The current supported extensions are:
 
-### Text-like files
+### Markdown files
 
 - `.md`
-- `.txt`
-- `.json`
-- `.csv`
-- `.log`
 
 ### PDF files
 
@@ -59,28 +57,10 @@ The current supported extensions are:
 - `.bmp`
 - `.svg`
 
-### Video files
-
-- `.mp4`
-- `.mov`
-- `.avi`
-- `.mkv`
-- `.webm`
-
-### Office files
-
-- `.doc`
-- `.docx`
-- `.xls`
-- `.xlsx`
-- `.ppt`
-- `.pptx`
-
 These are grouped into broad categories:
 
 - `documents`
 - `images`
-- `videos`
 - `other`
 
 ## What The File System Can Do
@@ -141,25 +121,80 @@ The search layer also understands some time-related wording such as:
 
 The backend builds a viewer payload for a file. Depending on the file type, the UI can present it as:
 
-- Text metadata preview
+- Text preview
 - PDF
 - Image
-- Video
 
-The current backend does not read file bodies or generate built-in summaries. Text-like files expose metadata previews, and the UI can open the raw file URL when deeper inspection is needed.
+The backend now runs a cached ingestion pass for supported files. Markdown files are read directly into text mode, PDFs attempt text extraction for the same text-mode summary path, and images are placed into image-analysis mode with cached metadata.
 
-### 4. Create folders
+### 4. Create Markdown and PDF documents
+
+The file layer can create new documents directly through the agent tool surface.
+
+There are two creation tools:
+
+- `create_markdown_document`
+- `create_pdf_document`
+
+Both tools are designed for structured composition rather than raw text dumping.
+They accept:
+
+- A document title
+- An optional introduction
+- An ordered list of sections
+- An optional destination folder
+- An optional filename override
+
+Each section can include:
+
+- `heading`
+- `body`
+- `bullets`
+- optional source hints such as a topic-like heading or matching file reference
+
+When section bodies are omitted, the system can infer content from matching existing document files and synthesize concise section text from cached ingestion output instead of copying the source file verbatim.
+
+### 5. Merge Markdown and PDF files
+
+The file layer can also combine existing files into a new output document.
+
+There are two merge tools:
+
+- `merge_markdown_files`
+- `merge_pdf_files`
+
+The behaviors are intentionally different:
+
+- Markdown merge is logical:
+  - Creates a new Markdown document
+  - Adds a title and introduction
+  - Lists source files
+  - Builds one synthesized section per source file using ingestion summaries and key points
+  - Avoids pasting the full raw body when a summary-style merge is possible
+- PDF merge is physical plus structured:
+  - Creates a new PDF
+  - Adds a generated cover page first
+  - Lists included source PDFs and merge order
+  - Preserves the original PDF pages after the cover page
+
+This distinction matters:
+
+- Use `create_markdown_document` or `create_pdf_document` when the user wants a coherent new document
+- Use `merge_markdown_files` when the user wants a combined Markdown brief
+- Use `merge_pdf_files` when the user wants several PDFs packaged into one PDF while keeping original pages
+
+### 6. Create folders
 
 New folders can be created inside the sandbox, either:
 
 - At the root
 - Inside an existing subdirectory
 
-### 5. Rename files
+### 7. Rename files
 
 Files can be renamed safely within their current directory.
 
-### 6. Move files
+### 8. Move files
 
 Astra supports several move patterns:
 
@@ -169,13 +204,13 @@ Astra supports several move patterns:
 
 When name collisions happen, Astra automatically appends a numeric suffix instead of overwriting the destination file.
 
-### 7. Categorize and separate files
+### 9. Categorize and separate files
 
 Astra can now organize files into folders automatically through the agent tool layer.
 
 Supported grouping strategies:
 
-- `type` → `Documents`, `Images`, `Videos`, `Other`
+- `type` → `Documents`, `Images`, `Other`
 - `extension` → folders like `PDF`, `PNG`, `MD`
 - `name` → folders based on the first meaningful filename token like `Acme` or `Helsinki`
 - `alphabetical` → `A`, `B`, `C`, `0-9`, `Other`
@@ -189,7 +224,7 @@ The categorization flow:
 - Moves files safely with name deduping
 - Supports `dry_run` mode to preview the organization plan without changing files
 
-### 8. Delete files and folders
+### 10. Delete files and folders
 
 The file layer supports:
 
@@ -243,6 +278,10 @@ Key tools include:
 - `list_user_files`
 - `search_user_files`
 - `open_user_file`
+- `create_markdown_document`
+- `create_pdf_document`
+- `merge_markdown_files`
+- `merge_pdf_files`
 - `create_user_folder`
 - `delete_user_folder`
 - `rename_user_file`
@@ -254,6 +293,15 @@ Key tools include:
 - `delete_multiple_files`
 
 These tools let the agent talk about files in natural language and then turn those requests into structured operations.
+
+The document-creation tools are especially useful when the user asks for:
+
+- a brief
+- a report
+- a guide
+- a summary document
+- a merged Markdown note that should read logically
+- a merged PDF packet with a title or cover page
 
 ## Examples
 
@@ -326,7 +374,51 @@ Typical behavior:
 - Calls `create_user_folder(name="Composer")`
 - Creates the folder under the file root
 
-### Example 6: Move multiple files
+### Example 6: Create a Markdown brief
+
+User intent:
+
+```text
+Create a markdown document called Acme_Pricing_and_Helsinki_Guide.md in the root files folder. Give it a short introduction and two sections: one for Acme pricing, one for the Helsinki guide. Make it read like one logical document, not just pasted notes.
+```
+
+Typical behavior:
+
+- Calls `create_markdown_document(...)`
+- Uses section headings as source hints when full section bodies are not provided
+- Pulls from matching source files through cached ingestion metadata
+- Produces synthesized section text rather than dumping the full original files
+
+### Example 7: Create a PDF brief
+
+User intent:
+
+```text
+Create a PDF document called Q1_Sales_Brief.pdf with an introduction, an overview section, a key accounts section, and a next steps section.
+```
+
+Typical behavior:
+
+- Calls `create_pdf_document(...)`
+- Builds a structured PDF from ordered sections
+- Produces a coherent report-style document rather than a raw file conversion
+
+### Example 8: Merge multiple PDFs
+
+User intent:
+
+```text
+Merge these PDFs into one packet and add a cover page explaining what is included.
+```
+
+Typical behavior:
+
+- Calls `merge_pdf_files(...)`
+- Creates a new PDF with a generated cover page
+- Lists included source PDFs and merge order
+- Appends original PDF pages after the cover page
+
+### Example 9: Move multiple files
 
 User intent:
 
@@ -339,7 +431,7 @@ Possible backend behavior:
 - Search or list matching files first
 - Call `move_multiple_files([...], "Sales")`
 
-### Example 7: Categorize by type
+### Example 10: Categorize by type
 
 User intent:
 
@@ -350,11 +442,11 @@ Categorize my files by type
 Typical behavior:
 
 - Calls `categorize_user_files(group_by="type")`
-- Creates folders such as `Documents`, `Images`, and `Videos`
+- Creates folders such as `Documents` and `Images`
 - Moves files into those folders
 - Returns a structured summary of created folders and moved files
 
-### Example 8: Separate by meaning
+### Example 11: Separate by meaning
 
 User intent:
 
@@ -368,7 +460,7 @@ Typical behavior:
 - Uses the domain router to choose buckets like `Sales`, `Travel`, or `Admin`
 - Moves files into semantic folders
 
-### Example 9: Preview organization by name
+### Example 12: Preview organization by name
 
 User intent:
 
@@ -389,6 +481,20 @@ Typical behavior:
 1. Search for a document
 2. Open it
 3. Hand off the selected file to a separate LLM workflow if deeper analysis is needed
+
+### Document authoring workflow
+
+1. Ask for a Markdown or PDF brief
+2. Provide a title, introduction, and section headings or section content
+3. Let the agent synthesize a structured output document
+4. Open the generated file from the file explorer
+
+### Merge workflow
+
+1. Choose the source Markdown or PDF files
+2. Decide whether the goal is a logical summary document or a physical packet
+3. Use Markdown merge for synthesized combined notes
+4. Use PDF merge for a cover page plus original appended pages
 
 ### Inbox attachment workflow
 
@@ -416,7 +522,8 @@ Each file can carry lightweight metadata beyond basic file stats.
 
 This includes:
 
-- Summary points derived from file metadata
+- Summary points derived from cached ingestion
+- Search text derived from extracted or synthesized document content
 - Tags
 - Domains
 - Thumbnail labels and accents
@@ -428,7 +535,9 @@ There is also a metadata sidecar:
 .astra_meta.json
 ```
 
-This is used to persist derived tags and domains per directory without modifying the original file contents.
+This is used to persist cached summaries, extracted search text, tags, and domains per directory without modifying the original file contents.
+
+For generated documents, the same sidecar metadata can also reflect newly created or merged outputs after the file is written and re-ingested.
 
 ## Safety Constraints
 
@@ -459,9 +568,8 @@ Depending on the UI surface, opening a file may:
 The backend already provides enough structure to support richer viewers for:
 
 - PDFs
-- Text documents
+- Markdown text
 - Images
-- Videos
 
 ## Summary
 
@@ -473,9 +581,12 @@ It supports:
 - Search
 - Preview
 - Open
+- Structured document creation
+- Logical Markdown merging
+- Cover-page PDF merging
 - Organize
 - Categorize
 - Delete
 - Active-file conversational context
 
-This makes it a core part of Astra's personal OS behavior: the assistant can find files, act on them safely, and hand off richer analysis to a separate LLM layer when needed.
+This makes it a core part of Astra's personal OS behavior: the assistant can find files, act on them safely, and use cached ingestion output as the first step of deeper LLM analysis when needed.

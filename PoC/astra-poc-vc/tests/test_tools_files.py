@@ -1,5 +1,5 @@
 """Tests for tools_files.py — verifies file discovery and domain routing."""
-import sys, os, json
+import sys, os, json, types
 from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -75,6 +75,7 @@ def test_preview_user_file_data_contains_summary_card():
     preview = tools_files.preview_user_file_data("Acme_Pricing_Tiers.md")
     assert preview["filename"] == "Acme_Pricing_Tiers.md"
     assert preview["summary_card"]["points"], "Expected summary points"
+    assert preview["analysis"]["mode"] == "text"
     assert "sales" in preview["domains"]
 
 
@@ -93,8 +94,172 @@ def test_open_user_file_data_includes_viewer_payload():
     assert opened["preview_type"] == "text"
     assert opened["viewer"]["kind"] == "text"
     assert opened["viewer"]["raw_url"].endswith("/Acme_Pricing_Tiers.md/raw")
-    assert "document file" in opened["content"].lower()
-    assert "open the raw file" in opened["content"].lower()
+    assert "pricing" in opened["content"].lower()
+    assert opened["summary_card"]["headline"]
+
+
+def test_preview_user_file_data_caches_ingestion_metadata(monkeypatch, tmp_path):
+    note = tmp_path / "Pricing_Brief.md"
+    note.write_text("# Pricing Brief\nAcme pricing and discount summary.", encoding="utf-8")
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+    preview = tools_files.preview_user_file_data("Pricing_Brief.md")
+    meta_path = tmp_path / ".astra_meta.json"
+
+    assert preview["analysis"]["mode"] == "text"
+    assert meta_path.exists()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "Pricing_Brief.md" in meta
+    assert meta["Pricing_Brief.md"]["mode"] == "text"
+    assert meta["Pricing_Brief.md"]["summary_short"]
+
+
+def test_create_markdown_document_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+
+    created = tools_files.create_markdown_document_data(
+        title="Weekly Brief",
+        sections=[
+            {"heading": "Overview", "body": "Pipeline is up and risks are contained."},
+            {"heading": "Next Steps", "bullets": ["Call Acme", "Send follow-up notes"]},
+        ],
+        destination_subdirectory="Notes",
+    )
+
+    created_path = tmp_path / "Notes" / "Weekly_Brief.md"
+    assert created["filename"] == "Weekly_Brief.md"
+    assert created_path.exists()
+    content = created_path.read_text(encoding="utf-8")
+    assert "# Weekly Brief" in content
+    assert "## Overview" in content
+    assert "## Next Steps" in content
+
+
+def test_merge_markdown_files_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+    (tmp_path / "One.md").write_text("# One\nAlpha notes", encoding="utf-8")
+    (tmp_path / "Two.md").write_text("# Two\nBeta notes", encoding="utf-8")
+
+    merged = tools_files.merge_markdown_files_data(
+        paths=["One.md", "Two.md"],
+        output_filename="Merged.md",
+        title="Combined Notes",
+    )
+
+    merged_path = tmp_path / "Merged.md"
+    assert merged["filename"] == "Merged.md"
+    assert merged["merged_from"] == ["One.md", "Two.md"]
+    content = merged_path.read_text(encoding="utf-8")
+    assert "# Combined Notes" in content
+    assert "## Sources" in content
+    assert "Alpha notes" in content
+    assert "Beta notes" in content
+    assert "\n# One\n" not in content
+    assert "\n# Two\n" not in content
+
+
+def test_create_markdown_document_data_autofills_sections_from_matching_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+    (tmp_path / "Acme_Pricing_Tiers.md").write_text(
+        "# Acme Pricing\nThree tiers are available for commercial accounts.",
+        encoding="utf-8",
+    )
+    (tmp_path / "Helsinki_Travel_Guide.md").write_text(
+        "# Helsinki Guide\nMarket Square and the Design District are key stops.",
+        encoding="utf-8",
+    )
+
+    created = tools_files.create_markdown_document_data(
+        title="Acme Pricing and Helsinki Guide",
+        filename="Acme_Pricing_and_Helsinki_Guide.md",
+        sections=[
+            {"heading": "Acme pricing"},
+            {"heading": "Helsinki guide"},
+        ],
+        introduction="Combined note prepared from existing files.",
+    )
+
+    created_path = tmp_path / "Acme_Pricing_and_Helsinki_Guide.md"
+    assert created["filename"] == "Acme_Pricing_and_Helsinki_Guide.md"
+    content = created_path.read_text(encoding="utf-8")
+    assert "Three tiers are available" in content
+    assert "Market Square and the Design District" in content
+    assert "\n# Acme Pricing\n" not in content
+    assert "\n# Helsinki Guide\n" not in content
+
+
+def test_create_pdf_document_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+    monkeypatch.setattr(tools_files, "_render_pdf_document_bytes", lambda **kwargs: b"%PDF-1.4\ncreated")
+    monkeypatch.setattr(tools_files, "_refresh_saved_file_metadata", lambda path: None)
+    monkeypatch.setattr(
+        tools_files,
+        "_build_preview_payload",
+        lambda path, base=None: {"filename": path.name, "path": tools_files._safe_relative_str(base or tmp_path, path)},
+    )
+
+    created = tools_files.create_pdf_document_data(
+        title="Board Summary",
+        sections=[{"heading": "Overview", "body": "Quarter closed above plan."}],
+        destination_subdirectory="Docs",
+    )
+
+    created_path = tmp_path / "Docs" / "Board_Summary.pdf"
+    assert created["filename"] == "Board_Summary.pdf"
+    assert created_path.exists()
+    assert created_path.read_bytes().startswith(b"%PDF-1.4")
+
+
+def test_merge_pdf_files_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
+    (tmp_path / "A.pdf").write_bytes(b"%PDF-a")
+    (tmp_path / "B.pdf").write_bytes(b"%PDF-b")
+    monkeypatch.setattr(tools_files, "_render_pdf_document_bytes", lambda **kwargs: b"%PDF-cover")
+
+    class _FakePage:
+        def __init__(self, text):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class _FakeReader:
+        def __init__(self, source):
+            self.pages = [_FakePage("page text")]
+
+    class _FakeWriter:
+        def __init__(self):
+            self.pages = []
+
+        def add_page(self, page):
+            self.pages.append(page)
+
+        def write(self, buffer):
+            buffer.write(b"%PDF-merged")
+
+    fake_pypdf = types.SimpleNamespace(PdfReader=_FakeReader, PdfWriter=_FakeWriter)
+    monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
+
+    captured = {}
+
+    def _fake_write_pdf_file_data(*, filename, content, destination_subdirectory=""):
+        captured["filename"] = filename
+        captured["content"] = content
+        captured["destination_subdirectory"] = destination_subdirectory
+        return {"filename": filename, "path": filename}
+
+    monkeypatch.setattr(tools_files, "_write_pdf_file_data", _fake_write_pdf_file_data)
+
+    merged = tools_files.merge_pdf_files_data(
+        paths=["A.pdf", "B.pdf"],
+        output_filename="Merged.pdf",
+        title="Q1 Packet",
+    )
+
+    assert merged["filename"] == "Merged.pdf"
+    assert merged["merged_from"] == ["A.pdf", "B.pdf"]
+    assert captured["filename"] == "Merged.pdf"
+    assert captured["content"].startswith(b"%PDF-merged")
 
 
 def test_create_folder_data_and_browse_subdirectory(monkeypatch, tmp_path):
@@ -117,7 +282,7 @@ def test_delete_user_folder_data_recursive(monkeypatch, tmp_path):
     nested.mkdir()
     (nested / "keep.md").write_text("# Keep\nfolder content", encoding="utf-8")
     (nested / "Sub").mkdir()
-    (nested / "Sub" / "more.txt").write_text("nested", encoding="utf-8")
+    (nested / "Sub" / "more.md").write_text("# More\nnested", encoding="utf-8")
     monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
 
     deleted = tools_files.delete_user_folder_data("Archive")
@@ -216,8 +381,8 @@ def test_move_files_in_folder_to_root(monkeypatch, tmp_path):
 
 def test_categorize_user_files_by_type(monkeypatch, tmp_path):
     (tmp_path / "Plan.md").write_text("# Plan", encoding="utf-8")
+    (tmp_path / "Brief.pdf").write_bytes(b"%PDF-1.4\n")
     (tmp_path / "Mock.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    (tmp_path / "Clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
     monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
 
     result = json.loads(tools_files.categorize_user_files.invoke({"group_by": "type"}))
@@ -225,8 +390,8 @@ def test_categorize_user_files_by_type(monkeypatch, tmp_path):
     assert result["group_by"] == "type"
     assert result["moved_count"] == 3
     assert (tmp_path / "Documents" / "Plan.md").exists()
+    assert (tmp_path / "Documents" / "Brief.pdf").exists()
     assert (tmp_path / "Images" / "Mock.png").exists()
-    assert (tmp_path / "Videos" / "Clip.mp4").exists()
 
 
 def test_categorize_user_files_by_name_dry_run(monkeypatch, tmp_path):

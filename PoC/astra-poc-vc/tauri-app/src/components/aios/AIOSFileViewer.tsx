@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
-type ViewerKind = "text" | "image" | "pdf" | "video";
-type FileCategory = ViewerKind | "office" | "other";
+type ViewerKind = "text" | "image" | "pdf";
+type FileCategory = ViewerKind | "other";
 
 interface FileViewerState {
   filename: string;
@@ -49,11 +49,9 @@ function inferKind(pathOrName: string, explicitKind?: ViewerKind): FileCategory 
   const suffix = pathOrName.includes(".")
     ? pathOrName.slice(pathOrName.lastIndexOf(".")).toLowerCase()
     : "";
-  if ([".md", ".txt", ".json", ".csv", ".log"].includes(suffix)) return "text";
+  if (suffix === ".md") return "text";
   if (suffix === ".pdf") return "pdf";
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].includes(suffix)) return "image";
-  if ([".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(suffix)) return "video";
-  if ([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"].includes(suffix)) return "office";
   return "other";
 }
 
@@ -189,21 +187,11 @@ export function AIOSFileViewer(props: AIOSFileViewerProps) {
               {!error && viewerKind === "pdf" && rawUrl ? (
                 <iframe className="aios-file-viewer__frame" src={rawUrl} title={title} />
               ) : null}
-              {!error && viewerKind === "video" && rawUrl ? (
-                <video className="aios-file-viewer__video" src={rawUrl} controls autoPlay />
-              ) : null}
               {!error && viewerKind === "text" ? (
                 <div className="aios-file-viewer__text-wrap">
                   <pre className="aios-file-viewer__text">
                     {file?.content || "No file content available."}
                   </pre>
-                </div>
-              ) : null}
-              {!error && viewerKind === "office" ? (
-                <div className="aios-file-viewer__text-wrap">
-                  <div className="aios-file-viewer__status">
-                    This file type opens as a raw file outside the embedded viewer.
-                  </div>
                 </div>
               ) : null}
               {!error && viewerKind === "other" ? (

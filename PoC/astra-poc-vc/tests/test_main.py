@@ -68,8 +68,8 @@ class TestFileApi:
             assert open_resp.status_code == 200
             opened = open_resp.json()
             assert opened["viewer"]["kind"] == "text"
-            assert "document file" in opened["content"].lower()
-            assert "open the raw file" in opened["content"].lower()
+            assert "pricing" in opened["content"].lower()
+            assert opened["analysis"]["mode"] == "text"
 
     @pytest.mark.anyio
     async def test_rename_move_and_delete_file(self, monkeypatch, tmp_path):
@@ -149,7 +149,7 @@ class TestFileApi:
         archive.mkdir()
         (archive / "Brief.md").write_text("# Brief\nFolder scoped note.", encoding="utf-8")
         (archive / "Sub").mkdir()
-        (archive / "Sub" / "Draft.txt").write_text("nested", encoding="utf-8")
+        (archive / "Sub" / "Draft.md").write_text("# Draft\nnested", encoding="utf-8")
         monkeypatch.setenv("PERSONA_FILES_DIR", str(tmp_path))
 
         transport = ASGITransport(app=app)

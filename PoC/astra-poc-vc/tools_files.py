@@ -17,17 +17,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from xml.sax.saxutils import escape
 from langchain_core.tools import tool
+from file_ingestion import ingest_file
 
 logger = logging.getLogger("astra.files")
 
-TEXT_EXTENSIONS = {".md", ".txt", ".json", ".csv", ".log"}
+TEXT_EXTENSIONS = {".md"}
 PDF_EXTENSIONS = {".pdf"}
 _META_FILENAME = ".astra_meta.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-OFFICE_EXTENSIONS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"}
-SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | PDF_EXTENSIONS | IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | OFFICE_EXTENSIONS
+SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | PDF_EXTENSIONS | IMAGE_EXTENSIONS
 
 STOP_WORDS = {
     "a", "about", "add", "all", "an", "and", "files", "find", "for", "from",
@@ -123,14 +123,10 @@ def _guess_category(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in PDF_EXTENSIONS:
         return "documents"
-    if suffix in OFFICE_EXTENSIONS:
-        return "documents"
     if suffix in TEXT_EXTENSIONS:
         return "documents"
     if suffix in IMAGE_EXTENSIONS:
         return "images"
-    if suffix in VIDEO_EXTENSIONS:
-        return "videos"
     return "other"
 
 
@@ -207,6 +203,386 @@ def _save_file_meta(file_path: Path, data: dict[str, Any]) -> None:
         pass
 
 
+def _refresh_saved_file_metadata(path: Path) -> None:
+    """Best-effort metadata refresh for newly created or modified files."""
+    try:
+        from domain_router import classify
+
+        summary_payload = _build_summary_payload(path)
+        computed_domains = classify(f"{path.name} {' '.join(summary_payload['summary'])}").domains
+        _save_file_meta(path, {
+            "tags": summary_payload["tags"],
+            "domains": computed_domains,
+            "indexed_at": datetime.now().astimezone().isoformat(),
+        })
+    except Exception:
+        logger.debug("Failed to refresh file metadata for %s", path, exc_info=True)
+
+
+def _normalize_output_filename(value: str, suffix: str, *, fallback_stem: str) -> str:
+    raw = Path(value).name.strip() if value else ""
+    if not raw:
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", fallback_stem).strip("_") or "Document"
+        raw = stem
+    if not raw.lower().endswith(suffix):
+        raw = f"{Path(raw).stem}{suffix}"
+    return raw
+
+
+def _resolve_output_path(filename: str, destination_subdirectory: str = "") -> tuple[Path, Path]:
+    base = _resolve_base()
+    relative_target = destination_subdirectory.strip().strip("/")
+    destination_dir = base if not relative_target else _safe_relative_path(base, relative_target)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = _dedupe_destination(destination_dir / Path(filename).name)
+    return base, destination
+
+
+def _normalize_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, section in enumerate(sections or [], start=1):
+        heading = str(section.get("heading", "")).strip() or f"Section {index}"
+        body = str(section.get("body", "")).strip()
+        bullets = [
+            str(item).strip() for item in section.get("bullets", []) if str(item).strip()
+        ]
+        if not body and not bullets:
+            source_path = str(section.get("source_path", "")).strip()
+            source_query = str(section.get("source_query", "")).strip() or heading
+            source_file: Path | None = None
+
+            if source_path:
+                try:
+                    source_file = _resolve_user_file(source_path, extensions=TEXT_EXTENSIONS | PDF_EXTENSIONS)
+                except Exception:
+                    source_file = None
+            if source_file is None and source_query:
+                matches = _collect_file_records(query=source_query, category="documents", limit=1)
+                if matches:
+                    try:
+                        source_file = _safe_relative_path(_resolve_base(), matches[0]["path"])
+                    except Exception:
+                        source_file = None
+
+            if source_file is not None:
+                body, bullets = _build_logical_section_content(source_file, heading=heading)
+        if not body and not bullets:
+            continue
+        normalized.append({
+            "heading": heading,
+            "body": body,
+            "bullets": bullets,
+        })
+    if not normalized:
+        raise ValueError("At least one non-empty section is required")
+    return normalized
+
+
+def _strip_markdown_for_summary(text: str) -> str:
+    cleaned = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\|.*\|$", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _extract_summary_sentences(text: str, limit: int = 2) -> list[str]:
+    cleaned = _strip_markdown_for_summary(text)
+    if not cleaned:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    return [sentence.strip() for sentence in sentences if sentence.strip()][:limit]
+
+
+def _build_logical_section_content(source_file: Path, *, heading: str) -> tuple[str, list[str]]:
+    ingestion = ingest_file(source_file)
+    summary_short = str(ingestion.get("summary_short") or "").strip()
+    summary_bullets = [
+        str(item).strip()
+        for item in ingestion.get("summary_bullets", [])
+        if str(item).strip()
+    ]
+    preview_text = str(
+        ingestion.get("content_preview")
+        or ingestion.get("raw_text_excerpt")
+        or ""
+    ).strip()
+    preview_sentences = _extract_summary_sentences(preview_text, limit=2)
+
+    body_parts: list[str] = []
+    if summary_short:
+        body_parts.append(summary_short.rstrip(".") + ".")
+    for sentence in preview_sentences:
+        if sentence not in body_parts:
+            body_parts.append(sentence)
+        if len(body_parts) >= 2:
+            break
+    if not body_parts:
+        body_parts.append(f"This section summarizes {heading.lower()}.")
+
+    logical_bullets = []
+    for bullet in summary_bullets:
+        normalized_bullet = bullet.lstrip("- ").strip()
+        if normalized_bullet and normalized_bullet not in logical_bullets:
+            logical_bullets.append(normalized_bullet)
+        if len(logical_bullets) >= 3:
+            break
+
+    return " ".join(body_parts[:2]).strip(), logical_bullets
+
+
+def _compose_markdown_document(
+    *,
+    title: str,
+    sections: list[dict[str, Any]],
+    introduction: str = "",
+    source_paths: list[str] | None = None,
+) -> str:
+    lines = [f"# {title.strip()}"]
+    if introduction.strip():
+        lines.extend(["", introduction.strip()])
+    if source_paths:
+        lines.extend(["", "## Sources", ""])
+        lines.extend([f"- `{source}`" for source in source_paths])
+
+    for section in _normalize_sections(sections):
+        lines.extend(["", f"## {section['heading']}", ""])
+        if section["body"]:
+            lines.append(section["body"])
+        if section["bullets"]:
+            if section["body"]:
+                lines.append("")
+            lines.extend([f"- {bullet}" for bullet in section["bullets"]])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_text_file_data(
+    *,
+    filename: str,
+    content: str,
+    destination_subdirectory: str = "",
+) -> dict[str, Any]:
+    base, destination = _resolve_output_path(filename, destination_subdirectory)
+    destination.write_text(content, encoding="utf-8")
+    _store_file_episode(destination.name, "created", f"Destination: {destination_subdirectory or 'root'}")
+    _refresh_saved_file_metadata(destination)
+    return _build_preview_payload(destination, base)
+
+
+def _render_pdf_document_bytes(
+    *,
+    title: str,
+    sections: list[dict[str, Any]],
+    introduction: str = "",
+    source_paths: list[str] | None = None,
+) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
+    except Exception as exc:
+        raise RuntimeError("reportlab is required to create PDF documents") from exc
+
+    import io
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=LETTER, title=title)
+    styles = getSampleStyleSheet()
+    story: list[Any] = [Paragraph(escape(title), styles["Title"]), Spacer(1, 16)]
+
+    if introduction.strip():
+        story.extend([Paragraph(escape(introduction.strip()).replace("\n", "<br/>"), styles["BodyText"]), Spacer(1, 12)])
+
+    if source_paths:
+        story.append(Paragraph("Sources", styles["Heading2"]))
+        story.append(
+            ListFlowable(
+                [ListItem(Paragraph(escape(path), styles["BodyText"])) for path in source_paths],
+                bulletType="bullet",
+            )
+        )
+        story.append(Spacer(1, 12))
+
+    for section in _normalize_sections(sections):
+        story.append(Paragraph(escape(section["heading"]), styles["Heading2"]))
+        if section["body"]:
+            paragraphs = [part.strip() for part in section["body"].split("\n\n") if part.strip()]
+            for paragraph in paragraphs:
+                story.append(Paragraph(escape(paragraph).replace("\n", "<br/>"), styles["BodyText"]))
+                story.append(Spacer(1, 8))
+        if section["bullets"]:
+            story.append(
+                ListFlowable(
+                    [ListItem(Paragraph(escape(item), styles["BodyText"])) for item in section["bullets"]],
+                    bulletType="bullet",
+                )
+            )
+            story.append(Spacer(1, 10))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _write_pdf_file_data(
+    *,
+    filename: str,
+    content: bytes,
+    destination_subdirectory: str = "",
+) -> dict[str, Any]:
+    base, destination = _resolve_output_path(filename, destination_subdirectory)
+    destination.write_bytes(content)
+    _store_file_episode(destination.name, "created", f"Destination: {destination_subdirectory or 'root'}")
+    _refresh_saved_file_metadata(destination)
+    return _build_preview_payload(destination, base)
+
+
+def create_markdown_document_data(
+    *,
+    title: str,
+    sections: list[dict[str, Any]],
+    filename: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> dict[str, Any]:
+    document_title = title.strip()
+    if not document_title:
+        raise ValueError("Document title is required")
+    output_name = _normalize_output_filename(filename, ".md", fallback_stem=document_title)
+    content = _compose_markdown_document(
+        title=document_title,
+        sections=sections,
+        introduction=introduction,
+    )
+    return _write_text_file_data(
+        filename=output_name,
+        content=content,
+        destination_subdirectory=destination_subdirectory,
+    )
+
+
+def create_pdf_document_data(
+    *,
+    title: str,
+    sections: list[dict[str, Any]],
+    filename: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> dict[str, Any]:
+    document_title = title.strip()
+    if not document_title:
+        raise ValueError("Document title is required")
+    output_name = _normalize_output_filename(filename, ".pdf", fallback_stem=document_title)
+    pdf_bytes = _render_pdf_document_bytes(
+        title=document_title,
+        sections=sections,
+        introduction=introduction,
+    )
+    return _write_pdf_file_data(
+        filename=output_name,
+        content=pdf_bytes,
+        destination_subdirectory=destination_subdirectory,
+    )
+
+
+def merge_markdown_files_data(
+    *,
+    paths: list[str],
+    output_filename: str = "",
+    title: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> dict[str, Any]:
+    if len(paths) < 2:
+        raise ValueError("At least two Markdown files are required to merge")
+
+    sources = [_resolve_user_file(path, extensions=TEXT_EXTENSIONS) for path in paths]
+    source_labels = [_safe_relative_str(_resolve_base(), source) for source in sources]
+    document_title = title.strip() or "Merged Markdown Document"
+    output_name = _normalize_output_filename(output_filename, ".md", fallback_stem=document_title)
+
+    sections: list[dict[str, Any]] = []
+    for source, source_label in zip(sources, source_labels):
+        body, bullets = _build_logical_section_content(
+            source,
+            heading=Path(source_label).stem.replace("_", " ").replace("-", " "),
+        )
+        sections.append({
+            "heading": Path(source_label).stem.replace("_", " ").replace("-", " "),
+            "body": body,
+            "bullets": bullets,
+        })
+
+    merged_content = _compose_markdown_document(
+        title=document_title,
+        sections=sections,
+        introduction=introduction or f"Merged from {len(source_labels)} Markdown files in the order provided.",
+        source_paths=source_labels,
+    )
+    payload = _write_text_file_data(
+        filename=output_name,
+        content=merged_content,
+        destination_subdirectory=destination_subdirectory,
+    )
+    payload["merged_from"] = source_labels
+    return payload
+
+
+def merge_pdf_files_data(
+    *,
+    paths: list[str],
+    output_filename: str = "",
+    title: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> dict[str, Any]:
+    if len(paths) < 2:
+        raise ValueError("At least two PDF files are required to merge")
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except Exception as exc:
+        raise RuntimeError("pypdf is required to merge PDF files") from exc
+
+    sources = [_resolve_user_file(path, extensions=PDF_EXTENSIONS) for path in paths]
+    source_labels = [_safe_relative_str(_resolve_base(), source) for source in sources]
+    document_title = title.strip() or "Merged PDF Document"
+    output_name = _normalize_output_filename(output_filename, ".pdf", fallback_stem=document_title)
+
+    cover_bytes = _render_pdf_document_bytes(
+        title=document_title,
+        introduction=introduction or f"Merged from {len(source_labels)} PDF files in the order provided.",
+        source_paths=source_labels,
+        sections=[{
+            "heading": "Merge Order",
+            "body": "The following source PDFs are appended after this cover page.",
+            "bullets": source_labels,
+        }],
+    )
+
+    writer = PdfWriter()
+    import io
+
+    for page in PdfReader(io.BytesIO(cover_bytes)).pages:
+        writer.add_page(page)
+    for source in sources:
+        reader = PdfReader(str(source))
+        for page in reader.pages:
+            writer.add_page(page)
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    payload = _write_pdf_file_data(
+        filename=output_name,
+        content=buffer.getvalue(),
+        destination_subdirectory=destination_subdirectory,
+    )
+    payload["merged_from"] = source_labels
+    return payload
+
+
 def _infer_image_tags(path: Path) -> list[str]:
     name = path.stem.replace("_", " ").replace("-", " ").lower()
     tokens = [token for token in name.split() if token and token not in STOP_WORDS]
@@ -221,34 +597,35 @@ def _file_domains(path: Path, preview_text: str) -> list[str]:
 
 def _build_summary_payload(path: Path) -> dict[str, Any]:
     category = _guess_category(path)
+    try:
+        ingestion = ingest_file(path)
+    except Exception:
+        logger.debug("File ingestion failed for %s", path, exc_info=True)
+        ingestion = {}
+
     if category == "images":
-        tags = _infer_image_tags(path)
+        tags = list(ingestion.get("keywords") or _infer_image_tags(path))
+        summary = list(ingestion.get("summary_bullets") or [])
+        if not summary:
+            summary = [
+                f"Image asset named {path.stem.replace('_', ' ').replace('-', ' ')}",
+                "Preview is available in the explorer panel.",
+            ]
+        return {"summary": summary[:3], "tags": tags, "ingestion": ingestion}
+
+    tags = list(ingestion.get("keywords") or [])
+    if not tags:
+        extension_tag = path.suffix.lower().lstrip(".")
+        tags = [extension_tag] if extension_tag else []
+
+    summary = list(ingestion.get("summary_bullets") or [])
+    if not summary:
+        file_label = path.stem.replace("_", " ").replace("-", " ")
         summary = [
-            f"Image asset named {path.stem.replace('_', ' ').replace('-', ' ')}",
-            "Preview is available in the explorer panel.",
-        ]
-        if tags:
-            summary.append(f"Suggested tags: {', '.join(tags[:3])}")
-        return {"summary": summary[:3], "tags": tags}
-
-    if category == "videos":
-        return {
-            "summary": [
-                f"Video asset: {path.name}",
-                "Preview is available as a downloadable asset.",
-            ],
-            "tags": [],
-        }
-
-    file_label = path.stem.replace("_", " ").replace("-", " ")
-    extension_tag = path.suffix.lower().lstrip(".")
-    return {
-        "summary": [
             f"Document file: {file_label}",
             "Open the raw file to inspect its contents.",
-        ],
-        "tags": [extension_tag] if extension_tag else [],
-    }
+        ]
+    return {"summary": summary[:3], "tags": tags, "ingestion": ingestion}
 
 
 def _file_record(path: Path, base: Optional[Path] = None) -> dict[str, Any]:
@@ -258,14 +635,14 @@ def _file_record(path: Path, base: Optional[Path] = None) -> dict[str, Any]:
     created_at = datetime.fromtimestamp(stat.st_ctime).astimezone().isoformat()
     category = _guess_category(path)
     preview_payload = _build_summary_payload(path)
+    ingestion = preview_payload.get("ingestion", {})
     relative_path = _safe_relative_str(base, path)
     raw_path = "/".join(quote(part, safe="") for part in Path(relative_path).parts)
-    preview_text = " ".join(preview_payload["summary"])
+    preview_text = ingestion.get("search_text") or " ".join(preview_payload["summary"])
     domains = _file_domains(path, preview_text)
     thumb_accent = {
         "documents": "#38bdf8",
         "images": "#f59e0b",
-        "videos": "#f97316",
         "other": "#94a3b8",
     }[category]
     record = {
@@ -283,6 +660,19 @@ def _file_record(path: Path, base: Optional[Path] = None) -> dict[str, Any]:
         "preview": "\n".join(preview_payload["summary"][:2]),
         "summary_points": preview_payload["summary"],
         "tags": preview_payload["tags"],
+        "summary_short": ingestion.get(
+            "summary_short",
+            preview_payload["summary"][0] if preview_payload["summary"] else "",
+        ),
+        "search_text": ingestion.get("search_text", preview_text),
+        "ingestion_mode": ingestion.get("mode", "text" if category == "documents" else "image"),
+        "analysis_ready": ingestion.get("analysis_ready", False),
+        "content_preview": ingestion.get("content_preview", ""),
+        "content_truncated": ingestion.get("text_truncated", False),
+        "needs_ocr": ingestion.get("needs_ocr", False),
+        "ocr_text": ingestion.get("ocr_text", ""),
+        "image_description": ingestion.get("description", ""),
+        "image_classification": ingestion.get("classification", category),
         "thumbnail": {
             "label": path.suffix.upper().lstrip(".") or "FILE",
             "accent": thumb_accent,
@@ -408,6 +798,7 @@ def _collect_file_records(
             [
                 record["filename"].lower(),
                 record["preview"].lower(),
+                record.get("search_text", "").lower(),
                 " ".join(record["domains"]).lower(),
                 " ".join(record["tags"]).lower(),
             ]
@@ -479,25 +870,23 @@ def _build_preview_payload(path: Path, base: Optional[Path] = None) -> dict[str,
         preview_type = "image"
     elif record["type"] == "pdf":
         preview_type = "pdf"
-    elif record["category"] == "videos":
-        preview_type = "video"
 
-    content = record["preview"] if preview_type == "text" else ""
+    content = record["content_preview"] if preview_type == "text" else ""
     viewer = {
         "kind": preview_type,
         "raw_url": record["raw_url"],
         "content": content,
-        "content_truncated": False,
+        "content_truncated": record["content_truncated"],
     }
 
     return {
         **record,
         "preview_type": preview_type,
         "content": content,
-        "content_truncated": False,
+        "content_truncated": record["content_truncated"],
         "viewer": viewer,
         "summary_card": {
-            "headline": f"{record['filename']} · {record['category']}",
+            "headline": record["summary_short"] or f"{record['filename']} · {record['category']}",
             "points": record["summary_points"],
             "domains": record["domains"],
         },
@@ -505,6 +894,13 @@ def _build_preview_payload(path: Path, base: Optional[Path] = None) -> dict[str,
             "classification": record["category"],
             "tags": record["tags"],
             "domains": record["domains"],
+            "mode": record["ingestion_mode"],
+            "summary_short": record["summary_short"],
+            "needs_ocr": record["needs_ocr"],
+            "ocr_text": record["ocr_text"],
+            "description": record["image_description"],
+            "image_classification": record["image_classification"],
+            "analysis_ready": record["analysis_ready"],
         },
         "actions": [
             {"id": "rename", "label": "Rename"},
@@ -532,6 +928,7 @@ def _record_search_blob(record: dict[str, Any]) -> str:
         [
             record.get("filename", ""),
             record.get("preview", ""),
+            record.get("search_text", ""),
             " ".join(record.get("summary_points", [])),
             " ".join(record.get("tags", [])),
             " ".join(record.get("domains", [])),
@@ -569,7 +966,6 @@ def _category_bucket_name(category: str) -> str:
     return {
         "documents": "Documents",
         "images": "Images",
-        "videos": "Videos",
         "other": "Other",
     }.get(category, "Other")
 
@@ -803,18 +1199,7 @@ def save_binary_file_data(filename: str, content: bytes, destination_subdirector
     destination = _dedupe_destination(destination_dir / safe_name)
     destination.write_bytes(content)
     _store_file_episode(safe_name, "saved", f"Destination: {destination_subdirectory}")
-    # Auto-tag: compute and persist metadata without reading file contents.
-    try:
-        from domain_router import classify
-        summary_payload = _build_summary_payload(destination)
-        computed_domains = classify(f"{safe_name} {' '.join(summary_payload['summary'])}").domains
-        _save_file_meta(destination, {
-            "tags": summary_payload["tags"],
-            "domains": computed_domains,
-            "indexed_at": datetime.now().astimezone().isoformat(),
-        })
-    except Exception:
-        pass
+    _refresh_saved_file_metadata(destination)
     return _build_preview_payload(destination, base)
 
 
@@ -834,7 +1219,7 @@ def list_user_files(
     all nested folders will be included automatically.
 
     Use query for semantic intent like "pricing", "recent files", or "downloaded yesterday".
-    Category supports all/documents/images/videos. Timeframe supports today/yesterday/recent.
+    Category supports all/documents/images. Timeframe supports today/yesterday/recent.
     """
     base = _resolve_base()
     if subdirectory:
@@ -879,8 +1264,6 @@ def search_user_files(query: str) -> str:
     query_lower = query.lower()
     if "image" in query_lower or "photo" in query_lower:
         category = "images"
-    elif "video" in query_lower:
-        category = "videos"
     elif "doc" in query_lower or "pdf" in query_lower or "note" in query_lower:
         category = "documents"
 
@@ -904,11 +1287,103 @@ def search_user_files(query: str) -> str:
 
 @tool
 def open_user_file(filename: str) -> str:
-    """Open a file inside Astra and return viewer-ready metadata for text, PDF, image, or video files."""
+    """Open a file inside Astra and return viewer-ready metadata for markdown, PDF, or image files."""
     try:
         return _tool_response(open_user_file_data(filename))
     except FileNotFoundError:
         return _tool_response({"error": f"File not found: {filename}"})
+
+
+@tool
+def create_markdown_document(
+    title: str,
+    sections: list[dict[str, Any]],
+    filename: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> str:
+    """Create a structured Markdown document from ordered sections."""
+    try:
+        return _tool_response(
+            create_markdown_document_data(
+                title=title,
+                sections=sections,
+                filename=filename,
+                destination_subdirectory=destination_subdirectory,
+                introduction=introduction,
+            )
+        )
+    except Exception as exc:
+        return _tool_response({"error": f"{type(exc).__name__}: {str(exc)}"})
+
+
+@tool
+def create_pdf_document(
+    title: str,
+    sections: list[dict[str, Any]],
+    filename: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> str:
+    """Create a structured PDF document from ordered sections."""
+    try:
+        return _tool_response(
+            create_pdf_document_data(
+                title=title,
+                sections=sections,
+                filename=filename,
+                destination_subdirectory=destination_subdirectory,
+                introduction=introduction,
+            )
+        )
+    except Exception as exc:
+        return _tool_response({"error": f"{type(exc).__name__}: {str(exc)}"})
+
+
+@tool
+def merge_markdown_files(
+    paths: list[str],
+    output_filename: str = "",
+    title: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> str:
+    """Merge two or more Markdown files into one structured Markdown document."""
+    try:
+        return _tool_response(
+            merge_markdown_files_data(
+                paths=paths,
+                output_filename=output_filename,
+                title=title,
+                destination_subdirectory=destination_subdirectory,
+                introduction=introduction,
+            )
+        )
+    except Exception as exc:
+        return _tool_response({"error": f"{type(exc).__name__}: {str(exc)}"})
+
+
+@tool
+def merge_pdf_files(
+    paths: list[str],
+    output_filename: str = "",
+    title: str = "",
+    destination_subdirectory: str = "",
+    introduction: str = "",
+) -> str:
+    """Merge two or more PDF files into one PDF with a generated cover page."""
+    try:
+        return _tool_response(
+            merge_pdf_files_data(
+                paths=paths,
+                output_filename=output_filename,
+                title=title,
+                destination_subdirectory=destination_subdirectory,
+                introduction=introduction,
+            )
+        )
+    except Exception as exc:
+        return _tool_response({"error": f"{type(exc).__name__}: {str(exc)}"})
 
 
 
@@ -1085,7 +1560,7 @@ def categorize_user_files(
     """Organize files into folders by type, extension, name, alphabetical bucket, or meaning.
 
     group_by:
-    - "type": Documents / Images / Videos / Other
+    - "type": Documents / Images / Other
     - "extension": PDF / PNG / MD / ...
     - "name": first meaningful token in the filename, e.g. "Acme", "Helsinki"
     - "alphabetical": A / B / C / 0-9 / Other
@@ -1136,6 +1611,10 @@ file_tools = [
     list_user_files,
     open_user_file,
     search_user_files,
+    create_markdown_document,
+    create_pdf_document,
+    merge_markdown_files,
+    merge_pdf_files,
     create_user_folder,
     delete_user_folder,
     rename_user_file,
@@ -1161,7 +1640,7 @@ def index_all_files(persona_id: str = "mike") -> int:
     count = 0
     for path in _iter_files(base=base):
         summary_payload = _build_summary_payload(path)
-        content = "\n".join(summary_payload["summary"])
+        content = summary_payload.get("ingestion", {}).get("search_text") or "\n".join(summary_payload["summary"])
         mgr.index_file(path=str(path), content=content)
         count += 1
         logger.info("Indexed file: %s", path.name)

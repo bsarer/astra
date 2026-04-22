@@ -45,6 +45,7 @@ _processed_email_ids: set[str] = set()
 # Tools that return data and MUST be followed by emit_ui
 DATA_TOOLS = {
     "list_user_files", "open_user_file", "search_user_files",
+    "create_markdown_document", "create_pdf_document", "merge_markdown_files", "merge_pdf_files",
     "create_user_folder", "rename_user_file", "move_user_file", "move_multiple_files", "move_files_in_folder", "categorize_user_files", "delete_user_file", "delete_multiple_files",
     "list_emails", "get_email", "search_emails",
     "list_calendar_events", "get_calendar_event",

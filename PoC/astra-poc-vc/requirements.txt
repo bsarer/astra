@@ -9,4 +9,6 @@ yfinance
 copilotkit
 qdrant-client
 openai
+pypdf
+reportlab
 langfuse>=2.0.0,<3.0.0
